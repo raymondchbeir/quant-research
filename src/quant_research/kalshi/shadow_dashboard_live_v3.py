@@ -47,7 +47,8 @@ def _research_footer_html(primary_session=None):
         '<div style="margin-top:18px;padding-top:12px;border-top:2px solid #ddd;">',
         '<h3 style="margin:0 0 8px">Research monitors — read-only</h3>',
         '<div style="font-size:11px;opacity:.65;margin-bottom:10px;">'
-        'Display-only snapshots. No orders, cancels, recorder state, or primary-shadow state are changed.'</n        '</div>',
+        'Display-only snapshots. No orders, cancels, recorder state, or primary-shadow state are changed.'
+        '</div>',
     ]
 
     # Counterfactual Q3/Q2/Q1/MAX2/MAX3 monitor.
