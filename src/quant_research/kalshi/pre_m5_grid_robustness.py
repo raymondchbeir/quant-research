@@ -174,10 +174,15 @@ def run_pre_m5_grid_robustness(
         ).iloc[0]
         best_x = float(best["threshold_x"])
         best_y = float(best["threshold_y"])
+        best_idx_arr = np.where(
+            np.isclose(surface["threshold_x"].to_numpy(float), best_x)
+            & np.isclose(surface["threshold_y"].to_numpy(float), best_y)
+        )[0]
+        if len(best_idx_arr) != 1:
+            raise RuntimeError(f"Could not identify unique full-sample best cell for {surface_name}.")
+        best_cell_idx = int(best_idx_arr[0])
 
-        # ------------------------------------------------------------------
         # 1) Leave one high-breadth window out.
-        # ------------------------------------------------------------------
         loo_delta_by_cell = [[] for _ in range(n_cells)]
         fold_positive_cell_pct = []
         best_rule_fold_delta = []
@@ -196,11 +201,7 @@ def run_pre_m5_grid_robustness(
 
             fold_positive = 100.0 * float(np.mean(deltas > 1e-12))
             fold_positive_cell_pct.append(fold_positive)
-            best_match = scored[
-                np.isclose(scored["threshold_x"], best_x)
-                & np.isclose(scored["threshold_y"], best_y)
-            ]
-            brd = float(best_match["delta"].iloc[0]) if len(best_match) else np.nan
+            brd = float(deltas[best_cell_idx])
             best_rule_fold_delta.append(brd)
 
             loo_rows.append({
@@ -219,9 +220,7 @@ def run_pre_m5_grid_robustness(
         loo_min_delta = np.array([np.nanmin(v) for v in loo_delta_by_cell], dtype=float)
         loo_median_delta = np.array([np.nanmedian(v) for v in loo_delta_by_cell], dtype=float)
 
-        # ------------------------------------------------------------------
         # 2) Score every cell separately in each session.
-        # ------------------------------------------------------------------
         session_delta_by_cell = [[] for _ in range(n_cells)]
         for session in sessions:
             w_s = windows[windows["session"].astype(str).eq(str(session))].copy()
@@ -231,10 +230,6 @@ def run_pre_m5_grid_robustness(
             for j, d in enumerate(deltas):
                 session_delta_by_cell[j].append(float(d))
 
-            best_match = scored[
-                np.isclose(scored["threshold_x"], best_x)
-                & np.isclose(scored["threshold_y"], best_y)
-            ]
             session_rows.append({
                 "surface": surface_name,
                 "session": str(session),
@@ -243,17 +238,16 @@ def run_pre_m5_grid_robustness(
                 "q3_pnl": float(pd.to_numeric(w_s["actual_pnl"], errors="coerce").fillna(0.0).sum()),
                 "positive_cells_pct": 100.0 * float(np.mean(deltas > 1e-12)),
                 "best_delta_in_session": float(np.nanmax(deltas)),
-                "full_sample_best_rule_delta": float(best_match["delta"].iloc[0]) if len(best_match) else np.nan,
+                "full_sample_best_rule_delta": float(deltas[best_cell_idx]),
             })
 
         session_min_delta = np.array([np.nanmin(v) for v in session_delta_by_cell], dtype=float)
         session_all_positive = np.array([
             all(d > 1e-12 for d in v) for v in session_delta_by_cell
         ], dtype=bool)
+        best_rule_worst_session_delta = float(np.nanmin(session_delta_by_cell[best_cell_idx]))
 
-        # ------------------------------------------------------------------
         # 3) How many heatmap cells are really the same flagged-window subset?
-        # ------------------------------------------------------------------
         set_groups = defaultdict(list)
         for j, r in surface.iterrows():
             flagged_set = _flagged_key_tuple(
@@ -310,13 +304,7 @@ def run_pre_m5_grid_robustness(
             "best_rule_loo_min_delta": float(np.nanmin(best_rule_fold_delta)),
             "best_rule_loo_median_delta": float(np.nanmedian(best_rule_fold_delta)),
             "all_sessions_positive_cells_pct": 100.0 * float(np.mean(session_all_positive)),
-            "best_rule_worst_session_delta": float(np.nanmin([
-                v[np.where(
-                    np.isclose(surface["threshold_x"].to_numpy(float), best_x)
-                    & np.isclose(surface["threshold_y"].to_numpy(float), best_y)
-                )[0][0]]
-                for v in [np.asarray(session_delta_by_cell, dtype=float).T]
-            ])) if len(sessions) else np.nan,
+            "best_rule_worst_session_delta": best_rule_worst_session_delta,
             "unique_flagged_sets": int(len(set_groups)),
             "cells_per_unique_set": float(n_cells / len(set_groups)) if set_groups else np.nan,
             "largest_identical_set_cells_pct": 100.0 * float(np.max(set_sizes)) / n_cells if len(set_sizes) else np.nan,
@@ -326,11 +314,6 @@ def run_pre_m5_grid_robustness(
     loo_influence = pd.DataFrame(loo_rows)
     by_session = pd.DataFrame(session_rows)
     unique_sets = pd.DataFrame(unique_rows)
-
-    # Recompute best-rule worst-session delta safely and transparently from by_session.
-    if len(robustness) and len(by_session):
-        worst_map = by_session.groupby("surface")["full_sample_best_rule_delta"].min()
-        robustness["best_rule_worst_session_delta"] = robustness["surface"].map(worst_map)
 
     robustness = robustness.sort_values(
         [
@@ -382,15 +365,15 @@ def run_pre_m5_grid_robustness(
             _plot_heatmap(
                 s,
                 "loo_positive_pct",
-                f"Q3 -> Q{qty:g} | LOO robustness: % omitted-window folds with positive Δ vs Q3\n{labels[0]} × {labels[1]}",
+                f"Q3 -> Q{qty:g} | LOO robustness: % omitted-window folds with positive delta vs Q3\n{labels[0]} x {labels[1]}",
                 "% LOO folds positive",
             )
             if plot_session_min:
                 _plot_heatmap(
                     s,
                     "session_min_delta",
-                    f"Q3 -> Q{qty:g} | Worst recorder-session Δ vs Q3\n{labels[0]} × {labels[1]}",
-                    "worst-session Δ vs Q3",
+                    f"Q3 -> Q{qty:g} | Worst recorder-session delta vs Q3\n{labels[0]} x {labels[1]}",
+                    "worst-session delta vs Q3",
                 )
 
     return {
