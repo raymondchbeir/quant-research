@@ -3,8 +3,7 @@ import asyncio
 from pathlib import Path
 from . import runtime_fix as _runtime_fix
 from . import recorder as R
-from . import shadow_trader as S
-from . import shadow_runtime_fix as _shadow_runtime_fix
+from . import primary_shadow_trader as S
 
 async def start_live(duration_minutes:float|None=None):
     await R.start_recorder(duration_minutes=duration_minutes);session=R.current_session_dir()
@@ -17,7 +16,7 @@ async def start_live(duration_minutes:float|None=None):
     S.start_shadow_trader(session);print(f"LIVE research session started: {session}");return session
 
 def live_status():
-    print("RECORDER");R.recorder_status();print("\nSHADOW TRADER");return S.shadow_status()
+    print("RECORDER");R.recorder_status();print("\nPRIMARY SHADOW TRADER");return S.shadow_status()
 
 async def stop_live()->Path|None:
     S.stop_shadow_trader();session=await R.stop_recorder();print(f"All live research stopped. Saved to: {session}");return session
