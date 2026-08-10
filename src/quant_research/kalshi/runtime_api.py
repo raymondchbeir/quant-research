@@ -125,7 +125,7 @@ def primary_shadow_status(show_rows=10):
 
 async def watch_primary_shadow_status(refresh_seconds=2.0, show_rows=8):
     _assert_pair_consistent()
-    from .shadow_dashboard_live_v3 import watch_primary_shadow_status as _watch
+    from .shadow_dashboard_live_v4 import watch_primary_shadow_status as _watch
     return await _watch(refresh_seconds=refresh_seconds, show_rows=show_rows)
 
 
