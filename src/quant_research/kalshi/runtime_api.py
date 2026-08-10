@@ -2,10 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from . import recorder as R
 from . import primary_shadow_trader as P
+from . import recorder as R
 from . import shadow_dashboard as D
-from . import shadow_trader as S
 
 _ACTIVE_RECORDER_SESSION = None
 _LAST_SHADOW_SESSION = None
@@ -15,15 +14,21 @@ def _resolved(path):
     return None if path is None else Path(path).resolve()
 
 
+def _shadow_session():
+    if P._SHADOW is None:
+        return None
+    return _resolved(P._SHADOW.session_dir)
+
+
 def _assert_pair_consistent():
     recorder_session = _resolved(R.current_session_dir())
-    shadow_session = _resolved(S._SHADOW.session_dir) if S._SHADOW is not None else None
+    shadow_session = _shadow_session()
     if recorder_session is not None and shadow_session is not None and recorder_session != shadow_session:
         raise RuntimeError(
             "Recorder/shadow session mismatch detected.\n"
             f"Recorder: {recorder_session}\n"
             f"Shadow:   {shadow_session}\n"
-            "Refusing to continue with ambiguous state. Restart the Jupyter kernel before starting a fresh run."
+            "Refusing to continue with ambiguous state. Restart the Jupyter kernel before a fresh run."
         )
     return recorder_session, shadow_session
 
@@ -42,6 +47,11 @@ async def start_recorder(duration_minutes=None, key_id=None, private_key_path=No
 async def stop_recorder():
     current = _resolved(R.current_session_dir())
     expected = _ACTIVE_RECORDER_SESSION
+    if P.primary_shadow_running():
+        raise RuntimeError(
+            "Primary shadow trader is still running. Stop it first with "
+            "stop_primary_shadow_trader(), then stop the recorder."
+        )
     if expected is not None and current is not None and expected != current:
         raise RuntimeError(
             "Recorder session changed inside this kernel.\n"
@@ -54,6 +64,10 @@ async def stop_recorder():
 
 def current_session_dir():
     return R.current_session_dir()
+
+
+def last_session_dir():
+    return R.last_session_dir()
 
 
 def recorder_status():
@@ -70,16 +84,22 @@ async def preview_15m_markets():
 
 def start_primary_shadow_trader(session_dir=None):
     global _LAST_SHADOW_SESSION
-    target = _resolved(session_dir) if session_dir is not None else _resolved(R.current_session_dir())
-    if target is None:
-        raise RuntimeError("No recorder session is running. Start the recorder first.")
-
+    health = R.recorder_health_snapshot()
+    if not health.get("running"):
+        raise RuntimeError("Recorder is not running. Start a fresh recorder first.")
+    if not health.get("healthy"):
+        raise RuntimeError(
+            "Recorder is running but not healthy enough for confirmatory OOS. "
+            f"Health: {health}"
+        )
     recorder_session = _resolved(R.current_session_dir())
-    if recorder_session is not None and target != recorder_session:
+    target = _resolved(session_dir) if session_dir is not None else recorder_session
+    if target is None:
+        raise RuntimeError("No active recorder session.")
+    if target != recorder_session:
         raise RuntimeError(
             f"Requested shadow session {target} does not match active recorder {recorder_session}."
         )
-
     out = P.start_primary_shadow_trader(target)
     _LAST_SHADOW_SESSION = target
     _assert_pair_consistent()
