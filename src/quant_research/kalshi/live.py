@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from . import runtime_fix as _runtime_fix
 from .recorder import current_session_dir, recorder_status, start_recorder, stop_recorder
 from .shadow_trader import shadow_status, start_shadow_trader, stop_shadow_trader
 
