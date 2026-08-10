@@ -40,6 +40,11 @@ from .pre_m5_prospective_monitor import (
     pre_m5_prospective_risk_status,
     stop_pre_m5_prospective_risk_monitor,
 )
+from .pre_m5_risk_strategy import (
+    start_pre_m5_risk_strategy_monitor,
+    pre_m5_risk_strategy_status,
+    stop_pre_m5_risk_strategy_monitor,
+)
 
 __all__ = [
     "start_live", "live_status", "stop_live",
@@ -57,4 +62,6 @@ __all__ = [
     "load_pre_m5_quotes", "build_contract_paths", "build_window_paths", "run_pre_m5_path_study",
     "start_pre_m5_prospective_risk_monitor", "pre_m5_prospective_risk_status",
     "stop_pre_m5_prospective_risk_monitor",
+    "start_pre_m5_risk_strategy_monitor", "pre_m5_risk_strategy_status",
+    "stop_pre_m5_risk_strategy_monitor",
 ]
