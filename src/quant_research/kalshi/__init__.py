@@ -23,6 +23,12 @@ from .high_breadth_failure import (
     replay_live_exposure_caps,
     run_high_breadth_failure_study,
 )
+from .risk_control_counterfactual import (
+    run_historical_risk_control_study,
+    start_counterfactual_risk_monitor,
+    counterfactual_risk_status,
+    stop_counterfactual_risk_monitor,
+)
 
 __all__ = [
     "start_live", "live_status", "stop_live",
@@ -35,4 +41,6 @@ __all__ = [
     "find_historical_window_sources", "run_historical_window_toxicity_study",
     "load_live_primary_signals", "run_window_regime_study",
     "discover_high_breadth_rules", "replay_live_exposure_caps", "run_high_breadth_failure_study",
+    "run_historical_risk_control_study", "start_counterfactual_risk_monitor",
+    "counterfactual_risk_status", "stop_counterfactual_risk_monitor",
 ]
