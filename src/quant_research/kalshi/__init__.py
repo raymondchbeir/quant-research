@@ -17,6 +17,7 @@ from .runtime_api import (
 )
 from .window_toxicity import find_window_toxicity_sources, run_window_toxicity_study
 from .window_toxicity_history import find_historical_window_sources, run_historical_window_toxicity_study
+from .window_regime import load_live_primary_signals, run_window_regime_study
 
 __all__ = [
     "start_live", "live_status", "stop_live",
@@ -27,4 +28,5 @@ __all__ = [
     "shadow_status", "watch_shadow_status",
     "find_window_toxicity_sources", "run_window_toxicity_study",
     "find_historical_window_sources", "run_historical_window_toxicity_study",
+    "load_live_primary_signals", "run_window_regime_study",
 ]
