@@ -29,6 +29,12 @@ from .risk_control_counterfactual import (
     counterfactual_risk_status,
     stop_counterfactual_risk_monitor,
 )
+from .pre_m5_path_study import (
+    build_contract_paths,
+    build_window_paths,
+    load_pre_m5_quotes,
+    run_pre_m5_path_study,
+)
 
 __all__ = [
     "start_live", "live_status", "stop_live",
@@ -43,4 +49,5 @@ __all__ = [
     "discover_high_breadth_rules", "replay_live_exposure_caps", "run_high_breadth_failure_study",
     "run_historical_risk_control_study", "start_counterfactual_risk_monitor",
     "counterfactual_risk_status", "stop_counterfactual_risk_monitor",
+    "load_pre_m5_quotes", "build_contract_paths", "build_window_paths", "run_pre_m5_path_study",
 ]
