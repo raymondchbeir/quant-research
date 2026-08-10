@@ -1,8 +1,29 @@
 from __future__ import annotations
+from collections import Counter
 from pathlib import Path
+import json
 import numpy as np
 import pandas as pd
+
 from . import shadow_trader as S
+# CRITICAL: importing this module applies the exact final-notebook parser/scheduler patches
+# to S.ShadowTrader before any primary shadow instance is created.
+from . import shadow_notebook_parity as _notebook_parity  # noqa: F401
+
+
+# Make notebook-style SKIP decisions visible live. The base logger already writes them to disk;
+# this wrapper only adds console visibility and does not alter trading/fill behavior.
+if not getattr(S.ShadowTrader.emit, "_primary_prints_skip", False):
+    _base_emit = S.ShadowTrader.emit
+
+    def _emit_with_skip(self, event, ticker=None, detail=None, **extra):
+        _base_emit(self, event, ticker, detail, **extra)
+        if event == "SKIP":
+            prefix = pd.Timestamp.now(tz="UTC").strftime("[%H:%M:%S UTC]")
+            print(f"{prefix} SKIP" + (f" | {ticker}" if ticker else "") + (f" | {detail}" if detail else ""))
+
+    _emit_with_skip._primary_prints_skip = True
+    S.ShadowTrader.emit = _emit_with_skip
 
 
 def _resolve_session(session_dir=None):
@@ -24,6 +45,7 @@ def start_primary_shadow_trader(session_dir=None):
         S._SHADOW.stop()
         S._SHADOW = None
     S._SHADOW = S.ShadowTrader(session).start()
+    print(f"PRIMARY SHADOW PARITY: {_notebook_parity.PARITY_VERSION}")
     print("PRIMARY SHADOW: M5 | BTC opposition | spread<=2c | -3c | 15s | 3ct | 10c candle-confirmed passive salvage | READ-ONLY")
     return S._SHADOW
 
@@ -55,6 +77,39 @@ def _mean_finite(s):
     return np.nan if len(x) == 0 else float(x.mean())
 
 
+def _read_events(path):
+    rows = []
+    try:
+        with Path(path).open("r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                try:
+                    rows.append(json.loads(line))
+                except Exception:
+                    pass
+    except FileNotFoundError:
+        pass
+    return rows
+
+
+def _decision_skip_reason(detail):
+    d = str(detail or "")
+    if "spread=" in d and ">2c" in d:
+        return "spread > 2c"
+    if "BTC not opposition" in d:
+        return "BTC not opposition"
+    if "missing causal Coinbase" in d:
+        return "missing BTC history"
+    if "no causal quote" in d:
+        return "no causal quote"
+    if "midpoint exactly 50c" in d:
+        return "midpoint = 50c"
+    if "illegal/non-passive" in d:
+        return "illegal/non-passive -3c"
+    if "shadow scheduler late" in d:
+        return "scheduler late >5s"
+    return None
+
+
 def primary_shadow_status(show_rows=15):
     if S._SHADOW is None:
         print("Primary shadow trader is not running.")
@@ -64,17 +119,52 @@ def primary_shadow_status(show_rows=15):
     with sh.lock:
         df = pd.DataFrame(list(sh.records.values()))
         thread_state = {t.name: t.is_alive() for t in sh.threads}
+        quote_tickers = list(sh.quotes.keys())
+        decisions_done = len(sh.decisions_done)
+
+    events = _read_events(sh.event_file)
+    decision_skips = Counter()
+    latest_decision_events = []
+    for e in events:
+        event = e.get("event")
+        if event == "SKIP":
+            reason = _decision_skip_reason(e.get("detail"))
+            if reason is not None:
+                decision_skips[reason] += 1
+                latest_decision_events.append(e)
+        elif event == "SIGNAL":
+            latest_decision_events.append(e)
 
     print("=" * 108)
     print("PRIMARY SHADOW — LIVE RESEARCH DASHBOARD")
     print("M5 | BTC 15m OPPOSITION | SPREAD <=2c | PASSIVE -3c | 15s | 3 CONTRACTS | 10c SALVAGE | READ-ONLY")
+    print(f"Parity: {_notebook_parity.PARITY_VERSION}")
     print("=" * 108)
 
+    signals = len(df)
+    evaluated = signals + sum(decision_skips.values())
+    frozen_quote_tickers = sum(1 for t in quote_tickers if t.split("-")[0] in S.FROZEN_SERIES)
+
+    print("\nDECISION ENGINE")
+    print(f"  Frozen tickers currently seen {frozen_quote_tickers:>6}     decisions_done set         {decisions_done:>6}")
+    print(f"  Decisions evaluated          {evaluated:>6}     eligible signals            {signals:>6}")
+    if decision_skips:
+        print("  Decision skips:")
+        for reason, count in decision_skips.most_common():
+            print(f"    {reason:<30} {count:>6}")
+    elif signals == 0:
+        print("  No decision events have fired yet. Watch the next minute-5 boundary.")
+
+    if latest_decision_events:
+        e = latest_decision_events[-1]
+        print(f"  Latest decision event: {e.get('event')} | {e.get('ticker')} | {e.get('detail')}")
+
     if df.empty:
-        print("No eligible shadow signals yet.")
+        print("\nNo eligible shadow signals yet.")
         print("\nTHREADS")
         for name, alive in thread_state.items():
             print(f"  {name:<22} {'OK' if alive else 'DEAD'}")
+        print("=" * 108)
         return df
 
     for c in ["entry_fill_qty", "exit_fill_qty", "entry_price", "entry_queue", "realized_pnl", "midpoint", "spread_c"]:
@@ -91,20 +181,18 @@ def primary_shadow_status(show_rows=15):
 
     df = df.sort_values("decision_time", na_position="last").reset_index(drop=True)
     filled = df["entry_fill_qty"].fillna(0) > 1e-12
-    full = df["entry_fill_qty"].fillna(0) >= 3.0 - 1e-12
+    full = df["entry_fill_qty"].fillna(0) >= S.QTY - 1e-12
     outcome_known = df["result"].isin(["YES", "NO"])
     settled = df["status"].eq("SETTLED")
     settled_filled = settled & filled
     correct = outcome_known & df["direction"].eq(df["result"])
     wrong = outcome_known & ~df["direction"].eq(df["result"])
 
-    signals = len(df)
     windows = int(df.loc[df["decision_time"].notna(), "decision_time"].nunique())
     filled_windows = int(df.loc[filled & df["decision_time"].notna(), "decision_time"].nunique())
     any_fills = int(filled.sum())
     full_fills = int(full.sum())
     known = int(outcome_known.sum())
-    settled_count = int(settled.sum())
     settled_fill_count = int(settled_filled.sum())
 
     booked_pnl = float(df["realized_pnl"].fillna(0).sum())
@@ -123,12 +211,10 @@ def primary_shadow_status(show_rows=15):
 
     if len(trade_pnl):
         equity = trade_pnl.cumsum().to_numpy(float)
-        peak = np.maximum.accumulate(np.r_[0.0, equity])[-len(equity):]
-        drawdown = peak - equity
-        max_dd = float(drawdown.max())
+        peaks = np.maximum.accumulate(np.r_[0.0, equity])[-len(equity):]
+        max_dd = float((peaks - equity).max())
         peak_equity = float(max(0.0, equity.max()))
-        best_idx = trade_pnl.idxmax()
-        worst_idx = trade_pnl.idxmin()
+        best_idx, worst_idx = trade_pnl.idxmax(), trade_pnl.idxmin()
         best_trade = (str(df.loc[best_idx, "ticker"]), float(df.loc[best_idx, "realized_pnl"]))
         worst_trade = (str(df.loc[worst_idx, "ticker"]), float(df.loc[worst_idx, "realized_pnl"]))
     else:
@@ -137,8 +223,7 @@ def primary_shadow_status(show_rows=15):
 
     signal_accuracy = _pct(int(correct.sum()), known)
     filled_accuracy = _pct(int(correct[settled_filled].sum()), settled_fill_count)
-    winner_signals = int(correct.sum())
-    loser_signals = int(wrong.sum())
+    winner_signals, loser_signals = int(correct.sum()), int(wrong.sum())
     winner_fills = int((correct & filled).sum())
     loser_fills = int((wrong & filled).sum())
     winner_fill_rate = _pct(winner_fills, winner_signals)
@@ -150,7 +235,6 @@ def primary_shadow_status(show_rows=15):
     exit_posts = int(df["exit_post"].notna().sum())
     exit_triggers = int(df["exit_trigger"].notna().sum())
     exit_fills = int((df["exit_fill_qty"].fillna(0) > 1e-12).sum())
-
     open_qty = (df["entry_fill_qty"].fillna(0) - df["exit_fill_qty"].fillna(0)).clip(lower=0)
     open_mask = filled & ~settled & (open_qty > 1e-12)
     open_positions = int(open_mask.sum())
