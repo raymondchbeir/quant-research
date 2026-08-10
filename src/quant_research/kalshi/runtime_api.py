@@ -40,7 +40,6 @@ async def start_recorder(duration_minutes=None, key_id=None, private_key_path=No
 
 
 async def stop_recorder():
-    global _ACTIVE_RECORDER_SESSION
     current = _resolved(R.current_session_dir())
     expected = _ACTIVE_RECORDER_SESSION
     if expected is not None and current is not None and expected != current:
@@ -50,8 +49,7 @@ async def stop_recorder():
             f"Recorder module now reports: {current}\n"
             "Refusing ambiguous stop. Restart the kernel."
         )
-    out = await R.stop_recorder(expected_session=expected)
-    return out
+    return await R.stop_recorder(expected_session=expected)
 
 
 def current_session_dir():
@@ -60,7 +58,7 @@ def current_session_dir():
 
 def recorder_status():
     out = R.recorder_status()
-    recorder_session, shadow_session = _assert_pair_consistent()
+    _, shadow_session = _assert_pair_consistent()
     out["shadow_session_dir"] = str(shadow_session) if shadow_session else None
     out["session_pair_consistent"] = True
     return out
@@ -107,7 +105,7 @@ def primary_shadow_status(show_rows=10):
 
 def watch_primary_shadow_status(refresh_seconds=2.0, show_rows=8):
     _assert_pair_consistent()
-    from .shadow_dashboard_live import watch_primary_shadow_status as _watch
+    from .shadow_dashboard_live_v2 import watch_primary_shadow_status as _watch
     return _watch(refresh_seconds=refresh_seconds, show_rows=show_rows)
 
 
