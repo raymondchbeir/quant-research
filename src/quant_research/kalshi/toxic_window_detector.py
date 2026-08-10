@@ -18,6 +18,7 @@ FEATURE_FAMILIES = {
     "conf_min_c": "KALSHI_CONFIDENCE",
     "conf_max_c": "KALSHI_CONFIDENCE",
     "conf_std_c": "KALSHI_CONFIDENCE",
+    "mid_dispersion_c": "KALSHI_DISPERSION",
     "entry_mean_c": "ENTRY_PRICE",
     "entry_min_c": "ENTRY_PRICE",
     "entry_max_c": "ENTRY_PRICE",
@@ -81,11 +82,7 @@ def _fetch_coinbase_1m(start, end, cache_path: Path | None = None, pause_s: floa
 
     while cursor < end:
         chunk_end = min(cursor + pd.Timedelta(minutes=250), end)
-        params = {
-            "granularity": 60,
-            "start": cursor.isoformat(),
-            "end": chunk_end.isoformat(),
-        }
+        params = {"granularity": 60, "start": cursor.isoformat(), "end": chunk_end.isoformat()}
         r = session.get(COINBASE_CANDLES_URL, params=params, timeout=15)
         r.raise_for_status()
         payload = r.json()
@@ -194,10 +191,13 @@ def _btc_features(decision_times: pd.Series, btc: pd.DataFrame) -> pd.DataFrame:
         z[f"btc_ret_{minutes}m_bp"] = 10000.0 * (z["btc_now"] / z[f"btc_{minutes}m_ago"] - 1.0)
 
     z["btc_abs_15m_bp"] = z["btc_ret_15m_bp"].abs()
-    signs = np.sign(z[["btc_ret_5m_bp", "btc_ret_15m_bp", "btc_ret_30m_bp", "btc_ret_60m_bp"]])
-    anchor = np.sign(z["btc_ret_15m_bp"]).to_numpy()[:, None]
-    z["btc_trend_alignment"] = (signs.to_numpy() == anchor).sum(axis=1)
-    z["btc_5v60_reversal"] = (np.sign(z["btc_ret_5m_bp"]) != np.sign(z["btc_ret_60m_bp"])).astype(float)
+    trend_cols = ["btc_ret_5m_bp", "btc_ret_15m_bp", "btc_ret_30m_bp", "btc_ret_60m_bp"]
+    signs = np.sign(z[trend_cols].to_numpy(float))
+    anchor = np.sign(z["btc_ret_15m_bp"].to_numpy(float))[:, None]
+    z["btc_trend_alignment"] = (signs == anchor).sum(axis=1)
+    z["btc_5v60_reversal"] = (
+        np.sign(z["btc_ret_5m_bp"].to_numpy(float)) != np.sign(z["btc_ret_60m_bp"].to_numpy(float))
+    ).astype(float)
     z = z.sort_values("_row").reset_index(drop=True)
     return z.drop(columns=[c for c in z.columns if c.endswith("_ago") or c == "btc_now"])
 
@@ -213,6 +213,7 @@ def _build_exante_windows(study: dict, project_root: Path, show: bool = True) ->
     signals["conf_c"] = 100.0 * (signals["midpoint"] - 0.50).abs()
     signals["entry_c"] = 100.0 * signals["entry_price"]
 
+    all_series = sorted(signals["series"].dropna().astype(str).unique())
     rows = []
     for (period, dt), g in signals.groupby(["period", "decision_time"], dropna=False):
         row = {
@@ -234,7 +235,7 @@ def _build_exante_windows(study: dict, project_root: Path, show: bool = True) ->
             "share_entry_ge70": (g["entry_c"] >= 70.0).mean(),
             "share_entry_ge80": (g["entry_c"] >= 80.0).mean(),
         }
-        for series in sorted(signals["series"].dropna().astype(str).unique()):
+        for series in all_series:
             row[f"asset_{series}"] = float((g["series"].astype(str) == series).any())
         rows.append(row)
 
@@ -276,7 +277,11 @@ def _edge_summary(g: pd.DataFrame, mask: pd.Series):
 
 
 def _candidate_scan(ex: pd.DataFrame, ref: pd.DataFrame, toxic: pd.DataFrame, aug: pd.DataFrame) -> pd.DataFrame:
-    features = [c for c in FEATURE_FAMILIES if c in ex.columns]
+    feature_family = dict(FEATURE_FAMILIES)
+    for col in ex.columns:
+        if col.startswith("asset_"):
+            feature_family[col] = "COMPOSITION"
+    features = [c for c in feature_family if c in ex.columns]
     rows = []
 
     ref_h = ref[ref["signals"] >= 3].copy()
@@ -297,9 +302,7 @@ def _candidate_scan(ex: pd.DataFrame, ref: pd.DataFrame, toxic: pd.DataFrame, au
         threshold = r.quantile(0.80 if direction == "HIGH" else 0.20)
 
         def flag(g):
-            if direction == "HIGH":
-                return g[feature] >= threshold
-            return g[feature] <= threshold
+            return (g[feature] >= threshold) if direction == "HIGH" else (g[feature] <= threshold)
 
         ref_mask = flag(ref_h).fillna(False)
         tox_mask = flag(tox_h).fillna(False)
@@ -312,7 +315,7 @@ def _candidate_scan(ex: pd.DataFrame, ref: pd.DataFrame, toxic: pd.DataFrame, au
 
         row = {
             "feature": feature,
-            "family": FEATURE_FAMILIES.get(feature, "OTHER"),
+            "family": feature_family.get(feature, "OTHER"),
             "direction": direction,
             "threshold": float(threshold),
             "ref_median": float(r.median()),
@@ -367,10 +370,7 @@ def _apply_rules(ex: pd.DataFrame, rules: pd.DataFrame) -> pd.DataFrame:
     for i, row in rules.iterrows():
         feature = row["feature"]
         threshold = float(row["threshold"])
-        if row["direction"] == "HIGH":
-            hit = z[feature] >= threshold
-        else:
-            hit = z[feature] <= threshold
+        hit = (z[feature] >= threshold) if row["direction"] == "HIGH" else (z[feature] <= threshold)
         z[f"risk_rule_{i+1}"] = hit.fillna(False)
         z["risk_score"] += z[f"risk_rule_{i+1}"].astype(int)
 
@@ -414,12 +414,7 @@ def _prevention_table(z: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def run_toxic_window_detector(
-    study: dict,
-    project_root=None,
-    show: bool = True,
-    max_rules: int = 4,
-):
+def run_toxic_window_detector(study: dict, project_root=None, show: bool = True, max_rules: int = 4):
     """Exploratory ex-ante detector study.
 
     Development protocol is fixed inside this function:
@@ -427,8 +422,8 @@ def run_toxic_window_detector(
       - historical toxic episode: Jun 29 through Jul 3, 2026
       - Aug 10 live session: validation/display only, never used to choose thresholds or rules
 
-    The detector is not approved for deployment. It is intended to identify candidate state
-    variables and estimate the opportunity cost of skipping flagged high-breadth windows.
+    The detector is not approved for deployment. It identifies candidate state variables and
+    estimates the opportunity cost of skipping flagged high-breadth windows.
     """
     project_root = Path(project_root or PROJECT_ROOT)
 
@@ -462,7 +457,7 @@ def run_toxic_window_detector(
         signal_edge=("signal_edge", "mean"),
         filled_edge=("filled_edge", "mean"),
         fill_rate=("fill_rate", "mean"),
-        actual_pnl=("actual_pnl", "sum"),
+        actual_pnl=("actual_pnl", lambda x: x.sum(min_count=1)),
     ).reset_index()
     risk_buckets["signal_edge_c"] = 100.0 * risk_buckets["signal_edge"]
     risk_buckets["filled_edge_c"] = 100.0 * risk_buckets["filled_edge"]
