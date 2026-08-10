@@ -15,6 +15,7 @@ from .runtime_api import (
     watch_primary_shadow_status,
     watch_shadow_status,
 )
+from .window_toxicity import find_window_toxicity_sources, run_window_toxicity_study
 
 __all__ = [
     "start_live", "live_status", "stop_live",
@@ -23,4 +24,5 @@ __all__ = [
     "start_primary_shadow_trader", "stop_primary_shadow_trader", "primary_shadow_status",
     "watch_primary_shadow_status", "start_shadow_trader", "stop_shadow_trader",
     "shadow_status", "watch_shadow_status",
+    "find_window_toxicity_sources", "run_window_toxicity_study",
 ]
