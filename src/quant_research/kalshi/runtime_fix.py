@@ -6,14 +6,16 @@ import time
 
 from . import recorder_core as C
 
-# Faster rotation for 15-minute markets.
+# Faster rotation for 15-minute markets and a bounded REST wait.
 C.MARKET_RESCAN_SECONDS = 5
+C.HTTP_TIMEOUT_SECONDS = 6
 
 # Keep last successful per-series result briefly so one transient REST failure
 # does not make us delete a live subscription.
 _SERIES_MARKET_CACHE = {}
 _CACHE_TTL_SECONDS = 45.0
 _MAX_SCAN_WORKERS = 8
+_SCAN_WALL_TIMEOUT_SECONDS = 8.0
 
 
 def _scan_one_series(series):
@@ -38,21 +40,36 @@ def scan_open_15m_markets_sync():
 
     if series:
         workers = max(1, min(_MAX_SCAN_WORKERS, len(series)))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = [pool.submit(_scan_one_series, s) for s in series]
-            for future in concurrent.futures.as_completed(futures):
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
+        futures = {pool.submit(_scan_one_series, s): str(s.get("ticker", "")) for s in series}
+        done, pending = concurrent.futures.wait(
+            futures,
+            timeout=_SCAN_WALL_TIMEOUT_SECONDS,
+            return_when=concurrent.futures.ALL_COMPLETED,
+        )
+
+        for future in done:
+            try:
                 st, markets, ok = future.result()
-                if not st:
-                    continue
-                if ok:
-                    _SERIES_MARKET_CACHE[st] = (now_mono, markets)
-                    by_series[st] = markets
-                else:
-                    cached = _SERIES_MARKET_CACHE.get(st)
-                    if cached and now_mono - cached[0] <= _CACHE_TTL_SECONDS:
-                        by_series[st] = cached[1]
-                    else:
-                        by_series[st] = []
+            except Exception:
+                st, markets, ok = futures.get(future, ""), [], False
+            if not st:
+                continue
+            if ok:
+                _SERIES_MARKET_CACHE[st] = (now_mono, markets)
+                by_series[st] = markets
+            else:
+                cached = _SERIES_MARKET_CACHE.get(st)
+                by_series[st] = cached[1] if cached and now_mono - cached[0] <= _CACHE_TTL_SECONDS else []
+
+        for future in pending:
+            st = futures.get(future, "")
+            cached = _SERIES_MARKET_CACHE.get(st)
+            by_series[st] = cached[1] if cached and now_mono - cached[0] <= _CACHE_TTL_SECONDS else []
+            future.cancel()
+
+        # Do not let slow individual series block the scanner wall clock.
+        pool.shutdown(wait=False, cancel_futures=True)
 
     series_meta = {str(s.get("ticker", "")): s for s in series}
     out = []
