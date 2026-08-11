@@ -45,6 +45,19 @@ from .pre_m5_risk_strategy import (
     pre_m5_risk_strategy_status,
     stop_pre_m5_risk_strategy_monitor,
 )
+from .pre_m5_range44_strategy import (
+    start_range44_prospective_monitor,
+    range44_prospective_status,
+    stop_range44_prospective_monitor,
+)
+from .live_research_stack import (
+    live_stack_snapshot,
+    prepare_live_research_stack,
+    render_live_research_stack_html,
+    start_live_research_stack,
+    stop_live_research_stack,
+    watch_live_research_stack,
+)
 
 __all__ = [
     "start_live", "live_status", "stop_live",
@@ -64,4 +77,8 @@ __all__ = [
     "stop_pre_m5_prospective_risk_monitor",
     "start_pre_m5_risk_strategy_monitor", "pre_m5_risk_strategy_status",
     "stop_pre_m5_risk_strategy_monitor",
+    "start_range44_prospective_monitor", "range44_prospective_status",
+    "stop_range44_prospective_monitor",
+    "live_stack_snapshot", "prepare_live_research_stack", "render_live_research_stack_html",
+    "start_live_research_stack", "stop_live_research_stack", "watch_live_research_stack",
 ]
