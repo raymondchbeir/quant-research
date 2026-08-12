@@ -4,6 +4,7 @@ from __future__ import annotations
 # monitor implementation for the optimized, nonblocking catch-up version.
 
 from . import live_research_stack_v4 as _v4
+from .live_research_stack import stop_live_research_stack as _stop_base_live_stack
 from .pre_m5_range44_scaled_strategy_fast import (
     range44_q15q5_status,
     start_range44_q15q5_monitor,
@@ -52,8 +53,13 @@ async def start_live_research_stack(
 
 
 async def stop_live_research_stack():
+    """Intentional full-session shutdown only: scaled monitor first, then base stack."""
     _wire_fast_monitor()
-    return await _v4.stop_live_research_stack()
+    try:
+        stop_range44_q15q5_monitor(show=False)
+    except Exception:
+        pass
+    return await _stop_base_live_stack()
 
 
 live_stack_snapshot = _v4.live_stack_snapshot
