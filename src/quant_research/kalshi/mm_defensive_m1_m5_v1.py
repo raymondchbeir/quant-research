@@ -66,9 +66,17 @@ def _momentum_c(mid_hist):
     return 100.0 * (mid_hist[-1][1] - mid_hist[0][1])
 
 
-def _purge_time_deque(dq, now_t, lookback_s):
+def _purge_mid_history(dq, now_t, lookback_s):
     cutoff = now_t - lookback_s
+    # Keep the latest observation at-or-before the cutoff as the momentum anchor.
     while len(dq) > 1 and dq[1][0] <= cutoff + EPS:
+        dq.popleft()
+
+
+def _purge_flow_history(dq, now_t, lookback_s):
+    cutoff = now_t - lookback_s
+    # Flow must contain ONLY events inside the lookback window.
+    while dq and dq[0][0] < cutoff - EPS:
         dq.popleft()
 
 
@@ -158,7 +166,7 @@ def _simulate_contract_defensive(
     tr_idx = B.bisect.bisect_left(trade_times, last_sample_t)
 
     def features(now_t):
-        _purge_time_deque(flow_hist, now_t, policy["flow_lookback_s"])
+        _purge_flow_history(flow_hist, now_t, policy["flow_lookback_s"])
         return _momentum_c(mid_hist), _flow_imbalance(flow_hist)
 
     def open_order(side, s, momentum_c, flow_imb):
@@ -332,7 +340,7 @@ def _simulate_contract_defensive(
                         signed = -float(tr.qty)  # aggressive YES sell
                     if abs(signed) > EPS:
                         flow_hist.append((tr.t, signed))
-                        _purge_time_deque(flow_hist, tr.t, policy["flow_lookback_s"])
+                        _purge_flow_history(flow_hist, tr.t, policy["flow_lookback_s"])
 
                     # Flow/inventory/cooldown may pull live quotes immediately.
                     enforce_policy_on_active(tr.t, current_sample, allow_open=False)
@@ -342,6 +350,7 @@ def _simulate_contract_defensive(
         if not B._valid_sample(s):
             current_sample = None
             current_mid = np.nan
+            mid_hist.clear()
             cancel("BID", s.t, "INVALID_BOOK")
             cancel("ASK", s.t, "INVALID_BOOK")
             continue
@@ -351,7 +360,7 @@ def _simulate_contract_defensive(
         last_valid_mid = s.mid
 
         mid_hist.append((s.t, s.mid))
-        _purge_time_deque(mid_hist, s.t, policy["momentum_lookback_s"])
+        _purge_mid_history(mid_hist, s.t, policy["momentum_lookback_s"])
 
         # First enforce BBO price changes.
         for side, px in (("BID", s.bid1), ("ASK", s.ask1)):
