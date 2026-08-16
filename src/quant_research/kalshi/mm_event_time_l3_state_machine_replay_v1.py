@@ -63,7 +63,6 @@ This is a counterfactual historical replay. Even Q1 can alter the public book,
 so live maker validation would still be required before deployment.
 """
 
-import bisect
 import json
 from collections import Counter, defaultdict, deque
 from datetime import datetime, timezone
@@ -113,13 +112,6 @@ def _f(x, default=np.nan):
         return default
 
 
-def _read_json(path: Path, default=None):
-    try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
-    except Exception:
-        return default
-
-
 def _top_state(row):
     bids = row.get("bid_levels") or []
     asks = row.get("ask_levels") or []
@@ -159,18 +151,12 @@ def _side_micro_state(side: str, cur: dict, hist: deque, now_t: float):
     past = _past_state(hist, float(now_t) - REPLENISH_LOOKBACK_S)
     if side == "BID":
         support = cur["bid_depth3"] > cur["ask_depth3"] + EPS
-        change = (
-            cur["bid_depth3"] - past["bid_depth3"]
-            if past is not None else np.nan
-        )
+        change = cur["bid_depth3"] - past["bid_depth3"] if past is not None else np.nan
     else:
         support = cur["ask_depth3"] > cur["bid_depth3"] + EPS
-        change = (
-            cur["ask_depth3"] - past["ask_depth3"]
-            if past is not None else np.nan
-        )
+        change = cur["ask_depth3"] - past["ask_depth3"] if past is not None else np.nan
 
-    replenishing = bool(np.isfinite(change) and change > 0.0 + EPS)
+    replenishing = bool(np.isfinite(change) and change > EPS)
     if support and replenishing:
         state = "STRONG"
     elif support:
@@ -189,33 +175,27 @@ def _load_quality(session: Path):
         / "contract_event_time_quality.csv"
     )
     if not audit_path.exists():
-        raise FileNotFoundError(
-            f"Prior V4 audit output is required before replay: {audit_path}"
-        )
+        raise FileNotFoundError(f"Prior V4 audit output is required before replay: {audit_path}")
     q = pd.read_csv(audit_path)
     need = {"ticker", "series", "full_boundary_capture"}
     missing = need - set(q.columns)
     if missing:
         raise RuntimeError(f"Audit CSV missing columns: {sorted(missing)}")
     ok = q["full_boundary_capture"].astype(str).str.lower().isin({"true", "1"})
-    q = q[ok & (q["series"].astype(str) != BTC_SERIES)].copy()
-    return q
+    return q[ok & (q["series"].astype(str) != BTC_SERIES)].copy()
 
 
 def _load_meta(session: Path):
     out = {}
-    p = session / "market_metadata.jsonl"
-    with p.open(encoding="utf-8") as fh:
+    with (session / "market_metadata.jsonl").open(encoding="utf-8") as fh:
         for line in fh:
             try:
                 r = json.loads(line)
             except Exception:
                 continue
             ticker = str(r.get("ticker") or "")
-            if not ticker:
-                continue
             close = _ts(r.get("close_time"))
-            if not np.isfinite(close):
+            if not ticker or not np.isfinite(close):
                 continue
             out[ticker] = {
                 "ticker": ticker,
@@ -227,9 +207,8 @@ def _load_meta(session: Path):
 
 def _load_trades(session: Path, eligible: set[str]):
     rows = []
-    p = session / "trades_event_time.jsonl"
-    with p.open(encoding="utf-8") as fh:
-        for i, line in enumerate(fh, 1):
+    with (session / "trades_event_time.jsonl").open(encoding="utf-8") as fh:
+        for line in fh:
             try:
                 r = json.loads(line)
             except Exception:
@@ -246,21 +225,19 @@ def _load_trades(session: Path, eligible: set[str]):
             if side not in {"bid", "ask"}:
                 continue
             rows.append((ticker, float(t), float(px), float(qty), side))
+
+    if not rows:
+        return {}
+    df = pd.DataFrame(rows, columns=["ticker", "t", "price", "qty", "taker_book_side"])
     out = {}
-    for ticker, z in pd.DataFrame(
-        rows, columns=["ticker", "t", "price", "qty", "taker_book_side"]
-    ).groupby("ticker", sort=False):
-        z = z.sort_values("t").reset_index(drop=True)
-        out[str(ticker)] = z
+    for ticker, z in df.groupby("ticker", sort=False):
+        out[str(ticker)] = z.sort_values("t").reset_index(drop=True)
     return out
 
 
 def _load_future_mid_series(session: Path, eligible: set[str]):
-    # The persisted top3 stream itself is the causal/replay book source. We make
-    # one compact pass containing only valid midpoints for post-fill markouts.
     mids = defaultdict(list)
-    p = session / "book_top3_events.jsonl"
-    with p.open(encoding="utf-8") as fh:
+    with (session / "book_top3_events.jsonl").open(encoding="utf-8") as fh:
         for i, line in enumerate(fh, 1):
             try:
                 r = json.loads(line)
@@ -277,10 +254,9 @@ def _load_future_mid_series(session: Path, eligible: set[str]):
                 mids[ticker].append((float(t), float(s["mid"])))
             if i % 1_000_000 == 0:
                 print(f"  markout pass: streamed {i:,} book rows...")
+
     out = {}
     for ticker, rows in mids.items():
-        if not rows:
-            continue
         rows.sort()
         out[ticker] = (
             np.asarray([x[0] for x in rows], dtype=float),
@@ -294,9 +270,7 @@ def _future_mid(mid_pack, target_t, max_age_s=2.0):
         return np.nan
     tt, mm = mid_pack
     j = int(np.searchsorted(tt, float(target_t), side="left"))
-    if j >= len(tt):
-        return np.nan
-    if float(tt[j]) - float(target_t) > max_age_s + EPS:
+    if j >= len(tt) or float(tt[j]) - float(target_t) > max_age_s + EPS:
         return np.nan
     return float(mm[j])
 
@@ -398,10 +372,7 @@ class PolicySim:
             "qty": qty,
             "price": float(ep["price"]),
             "mid_at_fill": float(mid_at_fill) if np.isfinite(mid_at_fill) else np.nan,
-            "gross_edge_at_fill_c": (
-                sign * (float(mid_at_fill) - float(ep["price"])) * 100.0
-                if np.isfinite(mid_at_fill) else np.nan
-            ),
+            "gross_edge_at_fill_c": sign * (float(mid_at_fill) - float(ep["price"])) * 100.0 if np.isfinite(mid_at_fill) else np.nan,
             "trade_through": bool(trade_through),
             "historical_trade_price": float(trade_px),
             "historical_trade_qty": float(trade_qty),
@@ -415,18 +386,10 @@ class PolicySim:
             fm = _future_mid(self.future_mids, float(tr_t) + h)
             tag = f"{int(h)}s"
             row[f"future_mid_{tag}"] = fm
-            row[f"markout_{tag}_c"] = (
-                sign * (fm - float(ep["price"])) * 100.0
-                if np.isfinite(fm) else np.nan
-            )
-            row[f"post_mid_move_{tag}_c"] = (
-                sign * (fm - float(mid_at_fill)) * 100.0
-                if np.isfinite(fm) and np.isfinite(mid_at_fill) else np.nan
-            )
+            row[f"markout_{tag}_c"] = sign * (fm - float(ep["price"])) * 100.0 if np.isfinite(fm) else np.nan
+            row[f"post_mid_move_{tag}_c"] = sign * (fm - float(mid_at_fill)) * 100.0 if np.isfinite(fm) and np.isfinite(mid_at_fill) else np.nan
         self.fills.append(row)
         self.counts[f"{side}_FILL_EVENT"] += 1
-
-        # Fixed conservative behavior: any fill removes the residual order.
         self._cancel(side, tr_t, "FILL_CANCEL_RESIDUAL")
 
     def process_trades_before(self, t, current_mid):
@@ -441,7 +404,6 @@ class PolicySim:
             trade_qty = float(tr.qty)
             taker = str(tr.taker_book_side)
 
-            # Passive BID is hit by an aggressive seller (taker book side ask).
             ep = self.active["BID"]
             if ep is not None and taker == "ask":
                 qpx = float(ep["price"])
@@ -457,7 +419,6 @@ class PolicySim:
                         if residual > EPS:
                             self._fill("BID", tr_t, trade_px, residual, current_mid, False)
 
-            # Passive ASK is lifted by an aggressive buyer (taker book side bid).
             ep = self.active["ASK"]
             if ep is not None and taker == "bid":
                 qpx = float(ep["price"])
@@ -482,10 +443,8 @@ class PolicySim:
             desired_px = cur["bid"] if side == "BID" else cur["ask"]
             ep = self.active[side]
 
-            # Public BBO changed: our old order is no longer the current-BBO quote.
             if ep is not None and abs(float(ep["price"]) - float(desired_px)) > EPS:
                 self._cancel(side, t, "BBO_REPRICE")
-                ep = None
 
             if self.name == "BASELINE_BBO_Q1":
                 allow_maintain = True
@@ -502,15 +461,13 @@ class PolicySim:
             ep = self.active[side]
             if ep is not None and not allow_maintain:
                 self._cancel(side, t, f"STATE_{state}")
-                ep = None
 
-            if ep is None and allow_open:
+            if self.active[side] is None and allow_open:
                 self._open(side, t, cur, state, support, replenishing, change)
             else:
                 self.counts[f"{side}_OBS_STATE_{state}"] += 1
 
     def finish(self, end_t):
-        # Process trades up to M5 using the last causal book midpoint.
         self.process_trades_before(end_t, self.last_mid)
         self._cancel("BID", end_t, "M5_END")
         self._cancel("ASK", end_t, "M5_END")
@@ -631,9 +588,7 @@ def _chronology(windows_all):
 def run_event_time_l3_state_machine_replay(session_dir, output_dir=None, *, show=True):
     session = Path(session_dir).resolve()
     if session.name != EXPECTED_SESSION_NAME:
-        raise RuntimeError(
-            f"Development replay is hard-bound to {EXPECTED_SESSION_NAME}; got {session.name}."
-        )
+        raise RuntimeError(f"Development replay is hard-bound to {EXPECTED_SESSION_NAME}; got {session.name}.")
     if not session.exists():
         raise FileNotFoundError(session)
 
@@ -643,8 +598,9 @@ def run_event_time_l3_state_machine_replay(session_dir, output_dir=None, *, show
     meta = {t: meta_all[t] for t in eligible}
     if not eligible:
         raise RuntimeError("No complete non-BTC contracts are eligible")
+    window_count = len({float(meta[t]["close_ts"]) for t in eligible})
 
-    print(f"Eligible contracts: {len(eligible)} across {quality[quality.ticker.isin(eligible)].series.nunique()} non-BTC series")
+    print(f"Eligible contracts: {len(eligible)} across {quality[quality.ticker.isin(eligible)].series.nunique()} non-BTC series | windows={window_count}")
     print("Loading event-time aggressive trades...")
     trades = _load_trades(session, eligible)
 
@@ -657,11 +613,9 @@ def run_event_time_l3_state_machine_replay(session_dir, output_dir=None, *, show
     }
     hists = {t: deque() for t in eligible}
     current_mid = {t: np.nan for t in eligible}
-    seen_book = set()
 
     print("Running exact event-time policy replay (second 3GB streaming pass)...")
-    book_path = session / "book_top3_events.jsonl"
-    with book_path.open(encoding="utf-8") as fh:
+    with (session / "book_top3_events.jsonl").open(encoding="utf-8") as fh:
         for i, line in enumerate(fh, 1):
             try:
                 r = json.loads(line)
@@ -674,13 +628,11 @@ def run_event_time_l3_state_machine_replay(session_dir, output_dir=None, *, show
             if not np.isfinite(t):
                 continue
 
-            # Trades preceding this book event see only the previously known book.
             for p in POLICIES:
                 sims[(p, ticker)].process_trades_before(t, current_mid[ticker])
 
             cur = _top_state(r)
             if cur is None:
-                # Invalid book means no passive quoting until a valid event arrives.
                 for p in POLICIES:
                     sims[(p, ticker)]._cancel("BID", t, "INVALID_BOOK")
                     sims[(p, ticker)]._cancel("ASK", t, "INVALID_BOOK")
@@ -690,11 +642,9 @@ def run_event_time_l3_state_machine_replay(session_dir, output_dir=None, *, show
 
             current_mid[ticker] = cur["mid"]
             hist = hists[ticker]
-            # Keep a little more than 500ms of state history.
             while hist and float(hist[0]["t"]) < float(t) - REPLENISH_LOOKBACK_S - 0.05:
                 hist.popleft()
             hist.append({"t": float(t), **cur})
-            seen_book.add(ticker)
 
             for p in POLICIES:
                 sims[(p, ticker)].on_book(t, cur, hist)
@@ -702,15 +652,11 @@ def run_event_time_l3_state_machine_replay(session_dir, output_dir=None, *, show
             if i % 1_000_000 == 0:
                 print(f"  replay pass: streamed {i:,} book rows...")
 
-    contracts_all = []
-    fills_all = []
-    episodes_all = []
-    counts_all = []
-
+    contracts_all, fills_all, episodes_all, counts_all = [], [], [], []
     for p in POLICIES:
         for ticker in sorted(eligible, key=lambda x: (meta[x]["close_ts"], x)):
             sim = sims[(p, ticker)]
-            end_t = meta[ticker]["close_ts"] - 600.0  # M5
+            end_t = meta[ticker]["close_ts"] - 600.0
             c = sim.finish(end_t)
             if c is not None:
                 contracts_all.append(c)
@@ -726,8 +672,7 @@ def run_event_time_l3_state_machine_replay(session_dir, output_dir=None, *, show
     episodes = pd.DataFrame(episodes_all)
     counts = pd.DataFrame(counts_all)
 
-    policy_rows = []
-    windows_list = []
+    policy_rows, windows_list = [], []
     for p in POLICIES:
         cdf = contracts[contracts.policy == p].copy() if len(contracts) else pd.DataFrame()
         fdf = fills[fills.policy == p].copy() if len(fills) else pd.DataFrame()
@@ -741,25 +686,17 @@ def run_event_time_l3_state_machine_replay(session_dir, output_dir=None, *, show
     windows_all = pd.concat(windows_list, ignore_index=True) if windows_list else pd.DataFrame()
     chronology = _chronology(windows_all)
 
-    # Primary incremental comparison to baseline.
     if len(policy_summary):
         base = policy_summary[policy_summary.policy == "BASELINE_BBO_Q1"].iloc[0]
         policy_summary["delta_net_vs_baseline"] = policy_summary.net_pnl - float(base.net_pnl)
-        policy_summary["delta_adverse_selection_vs_baseline"] = (
-            policy_summary.adverse_selection_to_m5 - float(base.adverse_selection_to_m5)
-        )
+        policy_summary["delta_adverse_selection_vs_baseline"] = policy_summary.adverse_selection_to_m5 - float(base.adverse_selection_to_m5)
         for h in MARKOUTS_S:
             tag = f"{int(h)}s"
             col = f"qw_markout_{tag}_c"
             policy_summary[f"delta_{col}_vs_baseline"] = policy_summary[col] - float(base[col])
 
     if output_dir is None:
-        output_dir = (
-            C.PROJECT_ROOT
-            / "results"
-            / "kalshi_mm_event_l3_state_machine_replay"
-            / session.name
-        )
+        output_dir = C.PROJECT_ROOT / "results" / "kalshi_mm_event_l3_state_machine_replay" / session.name
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -804,7 +741,7 @@ def run_event_time_l3_state_machine_replay(session_dir, output_dir=None, *, show
         print("\n" + "=" * 150)
         print("EVENT-TIME L3 SUPPORT + 500MS REPLENISHMENT MM REPLAY — DEVELOPMENT ONLY")
         print("=" * 150)
-        print(f"session={session.name} | eligible contracts={len(eligible)} | windows={quality[quality.ticker.isin(eligible)].shape[0] and quality[quality.ticker.isin(eligible)].ticker.nunique()}")
+        print(f"session={session.name} | eligible contracts={len(eligible)} | windows={window_count}")
         print("Quoted universe: complete non-BTC M0-M5 contracts only; BTC excluded for pre-PnL depth corruption.")
         print("Q1 at public BBO | conservative FIFO | no cancellation-ahead credit | fees=0")
         print("\nPOLICY SUMMARY")
