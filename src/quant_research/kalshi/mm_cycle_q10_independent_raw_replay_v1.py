@@ -12,7 +12,6 @@ No exchange API calls. No real orders. No parameter tuning.
 """
 
 import json
-import os
 from pathlib import Path
 
 import numpy as np
@@ -71,6 +70,15 @@ def _field_delta(a, b):
     return None
 
 
+def _new_output_dir(source_name: str):
+    OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    base = OUTPUT_ROOT / source_name
+    if not base.exists():
+        return base.resolve()
+    stamp = pd.Timestamp.now(tz="UTC").strftime("%Y%m%d_%H%M%S")
+    return (OUTPUT_ROOT / f"{source_name}_{stamp}").resolve()
+
+
 def run_independent_raw_replay(
     source_session,
     *,
@@ -82,6 +90,10 @@ def run_independent_raw_replay(
     if hard_bind and source.name != HARD_BOUND_OOS_SESSION:
         raise RuntimeError(
             f"Replay is hard-bound to formal OOS session {HARD_BOUND_OOS_SESSION}; got {source.name}."
+        )
+    if hard_bind and "mm_event_m0_m5_oos_cycle_q10_v1" not in str(source.parent):
+        raise RuntimeError(
+            "Hard-bound replay expects the formal frozen OOS root mm_event_m0_m5_oos_cycle_q10_v1."
         )
 
     required = [
@@ -99,11 +111,7 @@ def run_independent_raw_replay(
     if not fee.get("ok"):
         raise RuntimeError("Stored OOS fee preflight was not PASS; refusing replay.")
 
-    out = (OUTPUT_ROOT / source.name).resolve()
-    if out.exists():
-        raise FileExistsError(
-            f"Independent replay output already exists: {out}. Preserve it; do not overwrite."
-        )
+    out = _new_output_dir(source.name)
     out.mkdir(parents=True, exist_ok=False)
 
     # FrozenCycleShadow writes only inside the supplied workspace. It does not call Kalshi.
@@ -137,7 +145,6 @@ def run_independent_raw_replay(
     events = 0
 
     while b is not None or tr is not None:
-        choose_book = False
         if tr is None:
             choose_book = True
         elif b is None:
@@ -207,7 +214,9 @@ def run_independent_raw_replay(
         if d is None:
             exact_numeric = False
             continue
-        tol = 1e-9 if k not in {"fill_events", "cycles_started", "cycles_completed", "forced_liquidations"} else 1e-12
+        tol = 1e-9 if k not in {
+            "fill_events", "cycles_started", "cycles_completed", "forced_liquidations"
+        } else 1e-12
         if abs(float(d)) > tol:
             exact_numeric = False
 
@@ -242,6 +251,7 @@ def run_independent_raw_replay(
         print("INDEPENDENT FROZEN Q10 RAW REPLAY — NO ORDERS / NO EXCHANGE API")
         print("=" * 108)
         print("Source:", source)
+        print("Output:", out)
         print(f"Book rows:  {book_rows:,}")
         print(f"Trade rows: {trade_rows:,}")
         print(f"Events:     {events:,}")
