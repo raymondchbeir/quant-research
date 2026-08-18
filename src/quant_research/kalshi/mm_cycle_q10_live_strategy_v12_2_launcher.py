@@ -14,9 +14,14 @@ from . import mm_cycle_q10_live_strategy_v1 as B
 LIVE_VERSION = V122.LIVE_VERSION
 STAGED_VERSION = V122.STAGED_VERSION + "_STATIC_CHECK_FIX"
 
+# Capture the engine's original function ONCE, before any temporary monkeypatch.
+# The wrapper must call this saved object rather than V122.static_self_check,
+# otherwise the temporary patch recurses back into this wrapper.
+_ENGINE_STATIC_SELF_CHECK = V122.static_self_check
+
 
 def static_self_check(*, show=True):
-    base = V122.static_self_check(show=False)
+    base = _ENGINE_STATIC_SELF_CHECK(show=False)
     checks = dict(base.get("checks") or {})
 
     # `strategy_changed=False` is a descriptive invariant, not a failed check.
@@ -30,7 +35,7 @@ def static_self_check(*, show=True):
         "pass": all(checks.values()),
         "orders_sent": False,
         "exchange_api_called": False,
-        "launcher_fix": "V12_2_STATIC_CHECK_FALSE_INVARIANT",
+        "launcher_fix": "V12_2_STATIC_CHECK_FALSE_INVARIANT_NO_RECURSION",
     }
 
     if show:
