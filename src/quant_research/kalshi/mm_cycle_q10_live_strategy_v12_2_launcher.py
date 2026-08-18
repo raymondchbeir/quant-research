@@ -98,7 +98,7 @@ def audit_stage(session_dir, *, show=True, write_result=True):
     return V122.audit_stage(session_dir, show=show, write_result=write_result)
 
 
-def live_preflight(*, **kwargs):
+def live_preflight(**kwargs):
     return V122.live_preflight(**kwargs)
 
 
