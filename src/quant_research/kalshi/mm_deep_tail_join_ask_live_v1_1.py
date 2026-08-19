@@ -11,9 +11,12 @@ Execution-plumbing fixes only; strategy mechanics are unchanged.
    authoritative resting-order set, never a just-canceled single-order GET whose
    visibility/404 semantics caused the old V5 failure. The V2 batch endpoint remains
    the last mutation fallback; portfolio/fills is only reconciliation evidence.
+5. Cross-feed fill identity is keyed by order_id + trade_id/fill_id, so the same
+   execution seen first on the private fill WebSocket and later through REST cannot be
+   double-counted merely because WS uses ts_ms while REST exposes ts.
 
 No alpha parameter, quantity, M1/M5 boundary, order price, JOIN_ASK rule, loss
-threshold, recorder, or fill-accounting rule changes.
+threshold, recorder, or economic fill rule changes.
 """
 
 import asyncio
@@ -27,7 +30,7 @@ from . import recorder_core as C
 from . import mm_cycle_q10_live_strategy_v1 as B
 from . import mm_deep_tail_join_ask_live_v1 as V1
 
-LIVE_VERSION = "MM_DEEP_TAIL_JOIN_ASK_LIVE_V1_1_WALL_M1_STABLE_WS_V11_CANCEL"
+LIVE_VERSION = "MM_DEEP_TAIL_JOIN_ASK_LIVE_V1_1_WALL_M1_V11_CANCEL_FILL_DEDUP"
 
 
 class StablePrivateUserStream(V1.PrivateUserStream):
@@ -123,11 +126,15 @@ class BoundedRestFillReconciler(V1.RestFillReconciler):
 
     @staticmethod
     def _key(r):
+        oid = str((r or {}).get("order_id") or "")
+        trade = str((r or {}).get("trade_id") or (r or {}).get("fill_id") or "")
+        if trade:
+            return (oid, trade)
         return (
-            str((r or {}).get("trade_id") or ""),
-            str((r or {}).get("order_id") or ""),
+            oid,
             str((r or {}).get("ts_ms", (r or {}).get("ts")) or ""),
             str((r or {}).get("count_fp", (r or {}).get("count")) or ""),
+            str((r or {}).get("yes_price_dollars", (r or {}).get("yes_price")) or ""),
         )
 
     def _run(self):
@@ -168,6 +175,19 @@ class BoundedRestFillReconciler(V1.RestFillReconciler):
                     "recv_ms": V1._wall_ms(),
                 })
                 self.wake_event.set()
+
+
+def stable_fill_event_key(msg):
+    """Canonical identity shared by WS fill and REST fill representations."""
+    oid = str((msg or {}).get("order_id") or "")
+    trade = str((msg or {}).get("trade_id") or (msg or {}).get("fill_id") or "")
+    if trade:
+        return (oid, trade)
+    # Fallback only for a malformed/legacy row without a stable execution id.
+    ts = (msg or {}).get("ts_ms", (msg or {}).get("ts"))
+    qty = (msg or {}).get("count_fp", (msg or {}).get("count"))
+    px = (msg or {}).get("yes_price_dollars", (msg or {}).get("yes_price"))
+    return (oid, str(ts), str(qty), str(px))
 
 
 def safe_cancel_v2_resting_set(client, *, order_id, submitted_qty):
@@ -362,6 +382,7 @@ class WallClockM1DeepTailEngine(V1.DeepTailLiveEngine):
 def _install_patch():
     V1.PrivateUserStream = StablePrivateUserStream
     V1.RestFillReconciler = BoundedRestFillReconciler
+    V1._fill_event_key = stable_fill_event_key
     V1._safe_cancel_v2 = safe_cancel_v2_resting_set
     V1.DeepTailLiveEngine = WallClockM1DeepTailEngine
 
@@ -386,6 +407,7 @@ def static_self_check(*, show=True):
         "private_ws_idle_wakeup_s": 1.0,
         "rest_fill_reconciler_bounded_by_min_ts": True,
         "rest_fill_reconciler_deduplicated": True,
+        "cross_feed_fill_identity": "ORDER_ID_PLUS_TRADE_ID",
         "m1_scheduler": "CURRENT_WALL_CLOCK_2MS_LOOP",
         "m1_late_tolerance_s": V1.ENTRY_ARM_LATE_TOLERANCE_S,
         "cancel_single_order_get_after_delete": False,
@@ -405,6 +427,7 @@ __all__ = [
     "LIVE_VERSION",
     "StablePrivateUserStream",
     "BoundedRestFillReconciler",
+    "stable_fill_event_key",
     "safe_cancel_v2_resting_set",
     "WallClockM1DeepTailEngine",
     "run_live_process",
