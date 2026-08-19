@@ -2,23 +2,26 @@ from __future__ import annotations
 
 """V1.1 safety/latency hotfixes for the deep-tail live engine.
 
-Two execution-plumbing fixes only; strategy mechanics are unchanged.
+Three execution-plumbing fixes only; strategy mechanics are unchanged.
 
 1. Stable private WebSocket lifecycle
-   V1's first implementation used a 5-second ``wait_for(ws.recv())`` at the outer
-   connection scope. A quiet account could therefore reconnect every five seconds
-   and unnecessarily invoke the safety path that cancels entry orders when private
-   execution visibility goes down. V1.1 treats a quiet interval as normal and keeps
-   the authenticated ``fill`` + ``user_orders`` subscriptions alive.
+   A quiet account no longer forces a reconnect every few seconds. The authenticated
+   ``fill`` + ``user_orders`` subscriptions stay alive; actual socket failure still
+   clears READY and invokes the entry-order safety path.
 
 2. Session-bounded REST fill reconciliation
-   V1's fallback GET /portfolio/fills read the latest 1000 account fills every
-   500ms. V1.1 sets ``min_ts`` just before engine startup and deduplicates returned
-   fill identities, so old account history can never pollute this run's unmatched
-   private-event queue and repeated REST rows do not create avoidable CPU work.
+   The REST fallback uses ``min_ts`` from engine startup and deduplicates returned
+   fill identities, so old account history cannot pollute the live event queue.
 
-No alpha parameter, quantity, M1/M5 timing, order price, exit rule, loss threshold,
-recorder, or fill-accounting rule changes.
+3. Wall-clock M1 scheduler
+   Entry dispatch no longer depends on receiving a new public-book row in the exact
+   two-second M1 arming band. The already-running 2ms engine loop checks CURRENT wall
+   time and the V12.2 exact-EOF raw watcher; once M1 arrives it uses the latest
+   certified BBO and submits the fixed 5c pair. If the infrastructure cannot certify
+   a state before M1+2s, that market is skipped rather than entered late.
+
+No alpha parameter, quantity, M1/M5 boundary, order price, JOIN_ASK rule, loss
+threshold, recorder, or fill-accounting rule changes.
 """
 
 import asyncio
@@ -26,11 +29,13 @@ import json
 import threading
 import time
 
+import numpy as np
+
 from . import recorder_core as C
 from . import mm_cycle_q10_live_strategy_v1 as B
 from . import mm_deep_tail_join_ask_live_v1 as V1
 
-LIVE_VERSION = "MM_DEEP_TAIL_JOIN_ASK_LIVE_V1_1_STABLE_PRIVATE_WS_BOUNDED_REST_FILLS"
+LIVE_VERSION = "MM_DEEP_TAIL_JOIN_ASK_LIVE_V1_1_WALL_M1_STABLE_WS_BOUNDED_REST"
 
 
 class StablePrivateUserStream(V1.PrivateUserStream):
@@ -179,9 +184,69 @@ class BoundedRestFillReconciler(V1.RestFillReconciler):
                 self.wake_event.set()
 
 
+class WallClockM1DeepTailEngine(V1.DeepTailLiveEngine):
+    """V1 engine with M1 scheduling independent of book-update arrival timing."""
+
+    def enforce_wall_clock_m1(self):
+        if self.shutdown_started:
+            return
+        tickers = set(self.eligible) | set(self.meta)
+        for ticker in sorted(tickers):
+            if ticker in self.finalized or not self.eligible.get(ticker, False):
+                continue
+            if self.trade_deadline is not None and time.time() >= self.trade_deadline:
+                return
+
+            st = self.dt[ticker]
+            if st.get("entry_attempted"):
+                continue
+            e = self.wall_elapsed(ticker)
+            if not np.isfinite(e):
+                continue
+            if e < V1.M1_S:
+                continue
+            if e > V1.M1_S + V1.ENTRY_ARM_LATE_TOLERANCE_S:
+                st["entry_attempted"] = True
+                st["phase"] = "DISABLED"
+                st["disabled_reason"] = "MISSED_M1_ARM_WINDOW"
+                self._transition(
+                    ticker,
+                    "WINDOW_DISABLED",
+                    reason=st["disabled_reason"],
+                    elapsed_s=e,
+                    scheduler="WALL_CLOCK_V1_1",
+                )
+                continue
+
+            # During the 2s arming band, wait rather than immediately exclude the
+            # market if a safety feed is reconnecting. The hard M1+2s bound above
+            # ensures we never compensate by entering late.
+            if not self.private.ready.is_set() or not self.fast.ready():
+                continue
+
+            fresh_cur, cert = self._latest_fresh_bbo(ticker)
+            if fresh_cur is None:
+                continue
+
+            self._lat(
+                "M1_WALL_CLOCK_ENTRY_DISPATCH",
+                ticker=ticker,
+                wall_elapsed_s=e,
+                cert=cert,
+            )
+            self._submit_entry_pair(ticker, fresh_cur, e)
+
+    def enforce_wall_clock_m5(self):
+        # V1's event loop already calls this every pass. Put the M1 scheduler on
+        # that same starvation-proof wall-clock path before M5 enforcement.
+        self.enforce_wall_clock_m1()
+        return super().enforce_wall_clock_m5()
+
+
 def _install_patch():
     V1.PrivateUserStream = StablePrivateUserStream
     V1.RestFillReconciler = BoundedRestFillReconciler
+    V1.DeepTailLiveEngine = WallClockM1DeepTailEngine
 
 
 def run_live_process(session, cfg):
@@ -205,6 +270,8 @@ def static_self_check(*, show=True):
         "private_ws_idle_wakeup_s": 1.0,
         "rest_fill_reconciler_bounded_by_min_ts": True,
         "rest_fill_reconciler_deduplicated": True,
+        "m1_scheduler": "CURRENT_WALL_CLOCK_2MS_LOOP",
+        "m1_late_tolerance_s": V1.ENTRY_ARM_LATE_TOLERANCE_S,
     })
     if show:
         print("=" * 92)
@@ -219,6 +286,7 @@ __all__ = [
     "LIVE_VERSION",
     "StablePrivateUserStream",
     "BoundedRestFillReconciler",
+    "WallClockM1DeepTailEngine",
     "run_live_process",
     "static_self_check",
 ]
