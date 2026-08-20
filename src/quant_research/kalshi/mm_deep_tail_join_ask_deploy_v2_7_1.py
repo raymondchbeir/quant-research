@@ -2,16 +2,11 @@ from __future__ import annotations
 
 """V2.7.1 parent-side preflight hardening for transient public API 429s.
 
-This wrapper changes no live strategy, execution, sizing, timing, M5 logic, memory
-limits, guardian behavior, or promotion criteria from V2.7/V1.5.
-
-The only change is the read-only fee preflight used before launch:
-- pace public series/fee-change GETs;
-- retry only HTTP 429 / Too Many Requests with bounded exponential backoff;
-- cache a successful fee snapshot briefly inside the parent notebook process so a
-  read-only preflight followed immediately by launch does not repeat all public GETs.
-
-Importing this module sends no orders.
+No live strategy, execution, sizing, timing, M5, memory, guardian, or promotion
+mechanic changes from V2.7/V1.5.  This wrapper only hardens the read-only fee
+preflight by pacing requests, retrying 429s, and briefly caching a successful
+snapshot so notebook preflight + immediate launch do not duplicate the public GET
+burst.  Importing this module sends no orders.
 """
 
 import contextlib
@@ -33,10 +28,14 @@ Q10_ARM = V27.Q10_ARM
 KILL_ARM = V27.KILL_ARM
 PROMOTION_PATH = V27.PROMOTION_PATH
 
+# Capture the unwrapped V2.7 function once.  start_q1_smoke/start_q10 temporarily
+# replace V27.live_preflight; calling V27.live_preflight from our wrapper would
+# recurse.  Always delegate to this saved original instead.
+_V27_LIVE_PREFLIGHT_ORIGINAL = V27.live_preflight
+
 FEE_CACHE_TTL_S = 120.0
 FEE_REQUEST_PACE_S = 0.40
 FEE_RETRY_DELAYS_S = (0.75, 1.5, 3.0, 6.0, 10.0)
-
 _FEE_CACHE = {"time": 0.0, "result": None}
 
 
@@ -114,7 +113,6 @@ def resilient_fee_preflight(*, horizon_hours=OOS.FEE_CHANGE_HORIZON_H,
                 f"{series}: fee_type={fee_type!r}, expected 'quadratic' "
                 "(zero-maker structure)"
             )
-
         if not np.isfinite(mult) or mult <= 0:
             problems.append(
                 f"{series}: invalid fee_multiplier={s.get('fee_multiplier')!r}"
@@ -126,10 +124,7 @@ def resilient_fee_preflight(*, horizon_hours=OOS.FEE_CHANGE_HORIZON_H,
         try:
             fc = _rest_get_429_resilient(
                 "/series/fee_changes",
-                {
-                    "series_ticker": series,
-                    "show_historical": False,
-                },
+                {"series_ticker": series, "show_historical": False},
             )
             upcoming = fc.get("series_fee_change_arr") or []
         except Exception as exc:
@@ -145,7 +140,6 @@ def resilient_fee_preflight(*, horizon_hours=OOS.FEE_CHANGE_HORIZON_H,
             hours = (t - now).total_seconds() / 3600.0
             if -1e-9 <= hours <= float(horizon_hours):
                 near.append(r)
-
         if near:
             problems.append(
                 f"{series}: scheduled fee change within "
@@ -180,7 +174,6 @@ def resilient_fee_preflight(*, horizon_hours=OOS.FEE_CHANGE_HORIZON_H,
 
     if save_path is not None:
         OOS._atomic_json(save_path, out)
-
     if show:
         print("FEE PREFLIGHT:", "PASS" if ok else "FAIL")
         for r in rows:
@@ -191,7 +184,6 @@ def resilient_fee_preflight(*, horizon_hours=OOS.FEE_CHANGE_HORIZON_H,
             )
         for p in problems:
             print("  ERROR:", p)
-
     if not ok:
         raise RuntimeError(
             "Fee preflight failed; refusing live startup. " + " | ".join(problems)
@@ -222,6 +214,7 @@ def static_self_check(*, show=True):
         "fee_request_pace_s": FEE_REQUEST_PACE_S,
         "fee_cache_ttl_s": FEE_CACHE_TTL_S,
         "fee_429_never_bypassed": True,
+        "v27_delegate_recursion_safe": _V27_LIVE_PREFLIGHT_ORIGINAL is not live_preflight,
         "orders_sent": False,
         "ok": bool(base.get("ok")),
     })
@@ -231,38 +224,34 @@ def static_self_check(*, show=True):
         print("=" * 100)
         for k, v in out.items():
             print(f"{k:50s}: {v}")
-    if not out["ok"]:
+    if not out["ok"] or out["v27_delegate_recursion_safe"] is not True:
         raise RuntimeError(f"V2.7.1 static self-check failed: {out}")
     return out
 
 
 def live_preflight(**kwargs):
     with _patched_fee_preflight():
-        out = V27.live_preflight(**kwargs)
+        out = _V27_LIVE_PREFLIGHT_ORIGINAL(**kwargs)
     out = dict(out)
     out["parent_preflight_wrapper"] = DEPLOY_VERSION
     return out
 
 
-def start_q1_smoke(**kwargs):
-    # V27._launch resolves V27.live_preflight dynamically.  Temporarily replace
-    # that parent-side function so the launch receives the same resilient fee
-    # preflight without changing the live child implementation.
+def _with_resilient_v27_launch(fn, **kwargs):
     old = V27.live_preflight
     V27.live_preflight = live_preflight
     try:
-        return V27.start_q1_smoke(**kwargs)
+        return fn(**kwargs)
     finally:
         V27.live_preflight = old
+
+
+def start_q1_smoke(**kwargs):
+    return _with_resilient_v27_launch(V27.start_q1_smoke, **kwargs)
 
 
 def start_q10_one_hour(**kwargs):
-    old = V27.live_preflight
-    V27.live_preflight = live_preflight
-    try:
-        return V27.start_q10_one_hour(**kwargs)
-    finally:
-        V27.live_preflight = old
+    return _with_resilient_v27_launch(V27.start_q10_one_hour, **kwargs)
 
 
 def q1_promotion_check(*args, **kwargs):
@@ -282,20 +271,9 @@ def api_capacity_preflight(**kwargs):
 
 
 __all__ = [
-    "DEPLOY_VERSION",
-    "LIVE",
-    "CORE",
-    "Q1_ARM",
-    "Q10_ARM",
-    "KILL_ARM",
-    "PROMOTION_PATH",
-    "resilient_fee_preflight",
-    "static_self_check",
-    "live_preflight",
-    "api_capacity_preflight",
-    "start_q1_smoke",
-    "start_q10_one_hour",
-    "q1_promotion_check",
-    "live_status",
+    "DEPLOY_VERSION", "LIVE", "CORE", "Q1_ARM", "Q10_ARM", "KILL_ARM",
+    "PROMOTION_PATH", "resilient_fee_preflight", "static_self_check",
+    "live_preflight", "api_capacity_preflight", "start_q1_smoke",
+    "start_q10_one_hour", "q1_promotion_check", "live_status",
     "kill_and_flatten_live",
 ]
