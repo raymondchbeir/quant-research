@@ -25,6 +25,16 @@ A runtime-binding artifact records the exact class names.  The deployment launch
 must additionally inspect live health and refuse to arm unless the instantiated
 reconciler publishes mode ``MIN_TS_INCREMENTAL_DEDUP``.
 
+Static-check hardening
+----------------------
+``V1.PrivateUserStream`` is intentionally a mutable runtime hook.  Older wrapper
+imports can temporarily replace that hook, so comparing V1.7's persistent class
+against the hook's *current identity* makes a fresh control process fail even when
+the persistent class is valid and the final runtime rebind is correct.  The static
+check therefore verifies the persistent class against its immutable MRO origin
+(module/name) and its own override, while the launcher's runtime-binding artifact
+and instantiated health remain the authoritative proof of the class actually used.
+
 No strategy rule changes: Q, M1/M5 boundaries, 5c entries, first-fill-wins,
 fixed JOIN_ASK/no-reprice, M5 cleanup, recorder horizon, stale-orphan tombstones,
 loss logic, guardian logic, and order-group behavior are unchanged.
@@ -61,9 +71,28 @@ def _pure_incremental_metrics_check():
     }
 
 
+def _pure_private_stream_check():
+    """Validate V1.7's persistent stream without trusting the mutable V1 hook."""
+    cls = V17.PersistentPrivateUserStream
+    mro = tuple(cls.__mro__)
+    origin_ok = any(
+        base.__name__ == "PrivateUserStream" and base.__module__ == V1.__name__
+        for base in mro[1:]
+    )
+    return {
+        "class_name": cls.__name__,
+        "origin_private_stream_present": bool(origin_ok),
+        "run_override_present": "_run" in cls.__dict__,
+        "current_runtime_hook_class": getattr(V1.PrivateUserStream, "__name__", str(V1.PrivateUserStream)),
+        "current_runtime_hook_module": getattr(V1.PrivateUserStream, "__module__", None),
+        "runtime_hook_identity_required": False,
+    }
+
+
 def static_self_check(*, show=True):
     parent = V19.static_self_check(show=False)
     pure = _pure_incremental_metrics_check()
+    private = _pure_private_stream_check()
     checks = {
         "parent_v1_9_ok": parent.get("ok") is True,
         "incremental_class_available": pure.get("class_name") == "IncrementalRestFillReconciler",
@@ -72,8 +101,13 @@ def static_self_check(*, show=True):
         "incremental_dedupe_telemetry_present": pure.get("dedupe_telemetry_present") is True,
         "incremental_seen_set_bounded": pure.get("seen_bound") == 20000,
         "static_probe_thread_not_started": pure.get("thread_started") is False,
-        "persistent_private_stream_available": issubclass(
-            V17.PersistentPrivateUserStream, V1.PrivateUserStream
+        "persistent_private_stream_available": (
+            private.get("class_name") == "PersistentPrivateUserStream"
+            and private.get("origin_private_stream_present") is True
+            and private.get("run_override_present") is True
+        ),
+        "private_stream_static_check_ignores_mutable_runtime_hook_identity": (
+            private.get("runtime_hook_identity_required") is False
         ),
         "final_runtime_rebind_enabled": True,
         "strategy_rules_unchanged": True,
@@ -84,6 +118,7 @@ def static_self_check(*, show=True):
         "version": LIVE_VERSION,
         "expected_runtime_rest_mode": EXPECTED_REST_MODE,
         "runtime_binding_file": RUNTIME_BINDING_FILE,
+        "private_stream_probe": private,
         **checks,
         "ok": bool(ok),
     }
