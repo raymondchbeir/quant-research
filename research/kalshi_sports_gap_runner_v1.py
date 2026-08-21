@@ -23,7 +23,7 @@ import sys
 import types
 from pathlib import Path
 
-VERSION = "KALSHI_SPORTS_GAP_STANDALONE_RUNNER_V1"
+VERSION = "KALSHI_SPORTS_GAP_STANDALONE_RUNNER_V1_1_FRESH_RUN_DIR"
 
 LIVE_MARKERS = (
     "mm_deep_tail_join_ask_live",
@@ -82,7 +82,16 @@ def run(*, repo_root: Path, run_dir: Path, lookback_days: int = 365,
         exact_rps: float = 0.75, max_exact_markets: int = 250) -> dict:
     repo_root = Path(repo_root).resolve()
     run_dir = Path(run_dir).resolve()
-    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # The backfill owns creation of the run directory and deliberately uses
+    # exist_ok=False so a prior/partial run can never be silently overwritten.
+    # Only prepare its parent here.
+    run_dir.parent.mkdir(parents=True, exist_ok=True)
+    if run_dir.exists():
+        raise RuntimeError(
+            f"Fresh sports run directory already exists: {run_dir}. "
+            "Choose a new run_dir; refusing to overwrite a prior/partial study."
+        )
 
     backfill, analysis, exact = load_modules(repo_root)
 
