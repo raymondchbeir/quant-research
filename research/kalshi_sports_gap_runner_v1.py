@@ -23,7 +23,7 @@ import sys
 import types
 from pathlib import Path
 
-VERSION = "KALSHI_SPORTS_GAP_STANDALONE_RUNNER_V1_3_AMERICAN_FOOTBALL"
+VERSION = "KALSHI_SPORTS_GAP_STANDALONE_RUNNER_V1_4_FOOTBALL_RANDOM_SAMPLE"
 
 LIVE_MARKERS = (
     "mm_deep_tail_join_ask_live",
@@ -65,7 +65,7 @@ def _assert_no_live_imports() -> None:
 def load_modules(repo_root: Path):
     _install_package_shims(repo_root)
     backfill = importlib.import_module(
-        "quant_research.kalshi.sports_two_team_gap_backfill_v1_3_american_football"
+        "quant_research.kalshi.sports_two_team_gap_backfill_v1_4_football_random_sample"
     )
     analysis = importlib.import_module(
         "quant_research.kalshi.sports_two_team_gap_analysis_v1"
@@ -78,14 +78,13 @@ def load_modules(repo_root: Path):
 
 
 def run(*, repo_root: Path, run_dir: Path, lookback_days: int = 365,
-        max_events: int = 800, public_rps: float = 1.0,
+        max_events: int = 250, public_rps: float = 1.0,
         exact_rps: float = 0.75, max_exact_markets: int = 250) -> dict:
     repo_root = Path(repo_root).resolve()
     run_dir = Path(run_dir).resolve()
 
     # The backfill owns creation of the run directory and deliberately uses
     # exist_ok=False so a prior/partial run can never be silently overwritten.
-    # Only prepare its parent here.
     run_dir.parent.mkdir(parents=True, exist_ok=True)
     if run_dir.exists():
         raise RuntimeError(
@@ -171,7 +170,7 @@ def main() -> None:
     ap.add_argument("--repo-root", required=True)
     ap.add_argument("--run-dir", required=True)
     ap.add_argument("--lookback-days", type=int, default=365)
-    ap.add_argument("--max-events", type=int, default=800)
+    ap.add_argument("--max-events", type=int, default=250)
     ap.add_argument("--public-rps", type=float, default=1.0)
     ap.add_argument("--exact-rps", type=float, default=0.75)
     ap.add_argument("--max-exact-markets", type=int, default=250)
