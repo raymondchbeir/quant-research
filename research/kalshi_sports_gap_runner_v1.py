@@ -23,7 +23,7 @@ import sys
 import types
 from pathlib import Path
 
-VERSION = "KALSHI_SPORTS_GAP_STANDALONE_RUNNER_V1_2_STRICT_TEAM_GAMES"
+VERSION = "KALSHI_SPORTS_GAP_STANDALONE_RUNNER_V1_3_AMERICAN_FOOTBALL"
 
 LIVE_MARKERS = (
     "mm_deep_tail_join_ask_live",
@@ -65,7 +65,7 @@ def _assert_no_live_imports() -> None:
 def load_modules(repo_root: Path):
     _install_package_shims(repo_root)
     backfill = importlib.import_module(
-        "quant_research.kalshi.sports_two_team_gap_backfill_v1_2_strict_team_games"
+        "quant_research.kalshi.sports_two_team_gap_backfill_v1_3_american_football"
     )
     analysis = importlib.import_module(
         "quant_research.kalshi.sports_two_team_gap_analysis_v1"
@@ -85,6 +85,7 @@ def run(*, repo_root: Path, run_dir: Path, lookback_days: int = 365,
 
     # The backfill owns creation of the run directory and deliberately uses
     # exist_ok=False so a prior/partial run can never be silently overwritten.
+    # Only prepare its parent here.
     run_dir.parent.mkdir(parents=True, exist_ok=True)
     if run_dir.exists():
         raise RuntimeError(
