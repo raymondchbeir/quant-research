@@ -21,6 +21,7 @@ Importing this module performs no API calls and sends no orders.
 """
 
 from contextlib import contextmanager
+import inspect
 from pathlib import Path
 
 from . import mm_deep_tail_join_ask_live_v1_12_m12_guard_rotation as V112
@@ -120,7 +121,11 @@ def static_self_check(*, show=True):
     """Pure/static integration audit.  Does not run supervisor or guardian loops."""
     runtime = R.static_self_check(show=False)
     guardian_source_names = set(V2963._guardian_loop_v2963.__code__.co_names)
-    post_source_consts = set(V2963._post_m5_generation_state.__code__.co_consts)
+
+    # The M5_FINALIZED comparison lives inside the list-comprehension code object
+    # created by _post_m5_generation_state(), so checking only the outer
+    # function's co_consts is insufficient.  Inspect the function source instead.
+    post_source_text = inspect.getsource(V2963._post_m5_generation_state)
 
     checks = {
         "runtime_adapter_ok": runtime.get("ok") is True,
@@ -131,7 +136,7 @@ def static_self_check(*, show=True):
         "rss_hard_3072": abs(GENERATION_RSS_HARD_LIMIT_MB - 3072.0) < 1e-12,
         "guardian_reuses_v2963_intervention": "_guardian_intervene" in guardian_source_names,
         "guardian_uses_post_finalized_detector": "_post_m5_generation_state" in guardian_source_names,
-        "compatibility_phase_retained": "M5_FINALIZED" in post_source_consts,
+        "compatibility_phase_retained": "M5_FINALIZED" in post_source_text,
         "runtime_lifetime_m12": (
             runtime.get("runtime_contract", {}).get("rotation_process_lifetime")
             == "ONE_COMPLETE_M0_M12_WINDOW"
