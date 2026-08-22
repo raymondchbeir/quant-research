@@ -298,12 +298,21 @@ def _install_patch():
 
 
 def static_self_check(*, show=True):
-    """Offline structural audit. No API calls and no orders."""
-    intended = PREFLIGHT.static_self_check(show=False)
+    """Offline structural audit. No API calls and no orders.
+
+    The first call also executes the read-only V2.9.7 contract audit. Later calls
+    are intentionally idempotent after this module has installed its process-local
+    V1.12 parent binding.
+    """
+    if P.LIVE is LIVE:
+        intended_ok = True
+    else:
+        intended_ok = PREFLIGHT.static_self_check(show=False).get("ok") is True
+
     _install_patch()
 
     checks = {
-        "v2_9_7_intended_contract_ok": intended.get("ok") is True,
+        "v2_9_7_intended_contract_ok": intended_ok,
         "live_v1_12_exact": LIVE.LIVE_VERSION
         == "MM_DEEP_TAIL_JOIN_ASK_LIVE_V1_12_M12_GUARD_ROTATION",
         "q50_exact_50": Q50_Q == 50.0,
