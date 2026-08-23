@@ -158,7 +158,7 @@ def static_self_check(*, show=True):
         "manual_stop_blocks_continue": 'and not parent_kill' in _PATCHED_SUPERVISOR_SOURCE,
         "deadline_blocks_continue": 'and not deadline_reached' in _PATCHED_SUPERVISOR_SOURCE,
         "fresh_generation_preflight_preserved": 'P._fresh_generation_preflight' in _PATCHED_SUPERVISOR_SOURCE,
-        "fixed_session_risk_baseline_preserved": 'baseline_reset_between_generations\": False' in _PATCHED_SUPERVISOR_SOURCE,
+        "fixed_session_risk_baseline_preserved": 'baseline_reset_between_generations": False' in _PATCHED_SUPERVISOR_SOURCE,
         "m12_hard_recycle_preserved": M12_HARD_RECYCLE_GRACE_S == 45.0,
         "guardian_90s_preserved": GUARDIAN_POST_M12_EXIT_TIMEOUT_S == 90.0,
         "q50_exact_50": Q50_Q == 50.0,
