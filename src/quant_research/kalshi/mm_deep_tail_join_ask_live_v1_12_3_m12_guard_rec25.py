@@ -4,34 +4,25 @@ from __future__ import annotations
 
 Only the full-Q exit timing rule changes relative to V1.12.2.
 
-Frozen entry / risk behavior retained:
-- M1 entries: BUY YES 5c and BUY NO 5c (YES-book 95c), Q from launcher.
-- First fill selects the tail and cancels the opposite entry.
-- Selected-tail residual may continue to full Q.
-- Persistent M12 entry danger guard is unchanged.
-- M12 cleanup / reduce-only IOC flatten is unchanged.
-- Cancel stale-REST reconciliation and genuine-orphan fail-closed behavior are unchanged.
-- No repricing or chasing once a passive exit is posted.
+REC25 rule validated in the historical study:
+- causal pre-break anchor = median chosen-tail midpoint in
+  [first_fill-10s, first_fill-1s];
+- if that primary window has fewer than 3 observations, use the median in
+  [first_fill-30s, first_fill);
+- break_c = pre_mid_c - 5c;
+- after FULL Q, trigger at the first chosen-tail midpoint satisfying
+  5c + 0.25 * break_c;
+- then post one fixed reduce-only post-only GTC at the inherited freshest
+  certified chosen-tail ask; never reprice or chase;
+- if no valid positive break / no REC25 trigger, inherited M12 cleanup remains
+  the fallback.
 
-REC25 exit rule (from the validated historical study):
-1. On first selected-tail entry fill, form a causal pre-break anchor from chosen-tail
-   midpoint observations.
-2. Primary anchor = median chosen-tail midpoint from [first_fill-10s, first_fill-1s].
-3. If fewer than 3 observations exist, fallback = median over
-   [first_fill-30s, first_fill).
-4. break_c = pre_mid_c - 5c. If the anchor is missing or break_c <= 0, REC25 never
-   triggers and the inherited M12 cleanup is the fallback.
-5. After FULL Q is observed, wait until chosen-tail midpoint first reaches
-       5c + 0.25 * break_c.
-6. At that first causal trigger, use the inherited fresh-BBO certification and post
-   one fixed reduce-only post-only GTC at the current chosen-tail ask.
-7. If the opposite entry has not reached a terminal state yet, remember the REC25
-   trigger and post as soon as the inherited opposite-cancel gate clears.
-8. Once posted, no repricing / chasing.
+Entry, Q, M1, M12 guard, risk, stale-REST reconciliation, orphan fail-closed,
+recorder, rotation and M12 cleanup are otherwise unchanged.
 
-The live anchor buffer is bounded to the latest 31 seconds and stores only L1 BBO
-state changes (price or L1 size), avoiding overweighting deeper-book-only updates.
-Importing this module performs no API calls and sends no orders.
+The live anchor buffer is bounded to 31 seconds and records only L1 state changes
+(price or L1 size), so deeper-book-only updates do not overweight the midpoint
+median. Importing this module performs no API calls and sends no orders.
 """
 
 from collections import deque
@@ -73,13 +64,6 @@ def _finite(x):
         return None
 
 
-def _median(xs):
-    vals = [float(x) for x in xs if _finite(x) is not None]
-    if not vals:
-        return None
-    return float(np.median(np.asarray(vals, dtype=float)))
-
-
 def _chosen_mid_c(tail, yes_bid, yes_ask):
     bid = _finite(yes_bid)
     ask = _finite(yes_ask)
@@ -95,7 +79,7 @@ def _chosen_mid_c(tail, yes_bid, yes_ask):
 
 
 def _anchor_from_history(history, *, tail, first_fill_s):
-    """Pure implementation of the validated Cell-8 causal anchor."""
+    """Pure implementation of the validated historical causal anchor."""
     first_fill_s = _finite(first_fill_s)
     if first_fill_s is None:
         return {
@@ -109,27 +93,22 @@ def _anchor_from_history(history, *, tail, first_fill_s):
     rows = list(history or [])
     primary_lo = max(0.0, first_fill_s - PRE_LOOKBACK_S)
     primary_hi = max(0.0, first_fill_s - PRE_EXCLUDE_S)
-    primary = [
-        r for r in rows
-        if primary_lo <= float(r["elapsed_s"]) <= primary_hi
-    ]
+    primary = [r for r in rows if primary_lo <= float(r["elapsed_s"]) <= primary_hi]
 
     if len(primary) >= MIN_PRIMARY_OBS:
         selected = primary
         mode = "PRIMARY_10S_TO_1S"
     else:
         fallback_lo = max(0.0, first_fill_s - PRE_FALLBACK_S)
-        selected = [
-            r for r in rows
-            if fallback_lo <= float(r["elapsed_s"]) < first_fill_s
-        ]
+        selected = [r for r in rows if fallback_lo <= float(r["elapsed_s"]) < first_fill_s]
         mode = "FALLBACK_30S"
 
     mids = [
         _chosen_mid_c(tail, r.get("yes_bid"), r.get("yes_ask"))
         for r in selected
     ]
-    pre_mid_c = _median(mids)
+    mids = [float(x) for x in mids if x is not None and math.isfinite(float(x))]
+    pre_mid_c = float(np.median(np.asarray(mids, dtype=float))) if mids else None
     break_c = (pre_mid_c - ENTRY_C) if pre_mid_c is not None else None
     threshold_c = (
         ENTRY_C + RECOVERY_FRACTION * break_c
@@ -138,7 +117,7 @@ def _anchor_from_history(history, *, tail, first_fill_s):
     )
     return {
         "pre_mid_c": pre_mid_c,
-        "pre_obs": len([x for x in mids if x is not None]),
+        "pre_obs": len(mids),
         "anchor_mode": mode,
         "break_c": break_c,
         "threshold_c": threshold_c,
@@ -211,13 +190,7 @@ class Rec25M12Engine(V1122.CancelRestReconcileM12Engine):
         if hist is None:
             hist = deque()
             self._rec25_history[ticker] = hist
-        hist.append(
-            {
-                "elapsed_s": float(e),
-                "yes_bid": float(bid),
-                "yes_ask": float(ask),
-            }
-        )
+        hist.append({"elapsed_s": float(e), "yes_bid": float(bid), "yes_ask": float(ask)})
         cutoff = float(e) - HISTORY_KEEP_S
         while hist and float(hist[0]["elapsed_s"]) < cutoff:
             hist.popleft()
@@ -226,35 +199,22 @@ class Rec25M12Engine(V1122.CancelRestReconcileM12Engine):
         st = self._rec25_state(ticker)
         if st.get("anchor_ready"):
             return
-        first_s = self.wall_elapsed(ticker)
-        st["first_fill_s"] = _finite(first_s)
+        st["first_fill_s"] = _finite(self.wall_elapsed(ticker))
         st["tail"] = str(tail or "").upper()
-        anchor = _anchor_from_history(
-            self._rec25_history.get(str(ticker), ()),
-            tail=st["tail"],
-            first_fill_s=st["first_fill_s"],
+        st.update(
+            _anchor_from_history(
+                self._rec25_history.get(str(ticker), ()),
+                tail=st["tail"],
+                first_fill_s=st["first_fill_s"],
+            )
         )
-        st.update(anchor)
         st["anchor_ready"] = True
-        self._transition(
-            ticker,
-            "REC25_ANCHOR_FROZEN",
-            tail=st["tail"],
-            first_fill_s=st["first_fill_s"],
-            pre_mid_c=st["pre_mid_c"],
-            pre_obs=st["pre_obs"],
-            anchor_mode=st["anchor_mode"],
-            break_c=st["break_c"],
-            threshold_c=st["threshold_c"],
-        )
-        self._lat(
-            "REC25_ANCHOR_FROZEN",
-            ticker=ticker,
-            **{k: st.get(k) for k in (
-                "tail", "first_fill_s", "pre_mid_c", "pre_obs",
-                "anchor_mode", "break_c", "threshold_c",
-            )},
-        )
+        payload = {k: st.get(k) for k in (
+            "tail", "first_fill_s", "pre_mid_c", "pre_obs",
+            "anchor_mode", "break_c", "threshold_c",
+        )}
+        self._transition(ticker, "REC25_ANCHOR_FROZEN", **payload)
+        self._lat("REC25_ANCHOR_FROZEN", ticker=ticker, **payload)
 
     def _capture_full_entry_time(self, ticker):
         st = self._rec25_state(ticker)
@@ -271,7 +231,6 @@ class Rec25M12Engine(V1122.CancelRestReconcileM12Engine):
         tr_before = self.active.get(key)
         ticker = str((tr_before or {}).get("ticker") or "")
         role = str((tr_before or {}).get("role") or "")
-        tail = str((tr_before or {}).get("tail") or "").upper()
         dt_before = self.dt.get(ticker) if ticker else None
         chosen_before = (dt_before or {}).get("chosen_tail")
         full_before = bool((dt_before or {}).get("full_entry_ready"))
@@ -282,14 +241,11 @@ class Rec25M12Engine(V1122.CancelRestReconcileM12Engine):
             dt_after = self.dt.get(ticker) or {}
             chosen_after = dt_after.get("chosen_tail")
             full_after = bool(dt_after.get("full_entry_ready"))
-
             if chosen_before is None and chosen_after is not None:
                 self._capture_first_fill_anchor(ticker, chosen_after)
-
             if (not full_before) and full_after:
                 self._capture_full_entry_time(ticker)
                 self._evaluate_rec25(ticker)
-
         return out
 
     def _evaluate_rec25(self, ticker, elapsed_s=None):
@@ -302,10 +258,9 @@ class Rec25M12Engine(V1122.CancelRestReconcileM12Engine):
             return False
 
         st = self._rec25_state(ticker)
-        if not st.get("anchor_ready"):
-            return False
-        threshold_c = _finite(st.get("threshold_c"))
+        threshold_c = _finite(st.get("threshold_c")) if st.get("anchor_ready") else None
         if threshold_c is None:
+            dt["phase"] = "FULL_ENTRY_WAITING_REC25_NO_VALID_THRESHOLD"
             return False
 
         full_s = _finite(st.get("full_entry_s"))
@@ -328,26 +283,18 @@ class Rec25M12Engine(V1122.CancelRestReconcileM12Engine):
             st["triggered"] = True
             st["trigger_s"] = float(e)
             st["trigger_mid_c"] = float(mid_c)
-            self._transition(
-                ticker,
-                "REC25_TRIGGERED",
-                tail=st.get("tail"),
-                elapsed_s=float(e),
-                full_entry_s=full_s,
-                delay_after_full_s=(float(e) - full_s if full_s is not None else None),
-                pre_mid_c=st.get("pre_mid_c"),
-                break_c=st.get("break_c"),
-                threshold_c=threshold_c,
-                current_mid_c=float(mid_c),
-            )
-            self._lat(
-                "REC25_TRIGGERED",
-                ticker=ticker,
-                tail=st.get("tail"),
-                elapsed_s=float(e),
-                threshold_c=threshold_c,
-                current_mid_c=float(mid_c),
-            )
+            payload = {
+                "tail": st.get("tail"),
+                "elapsed_s": float(e),
+                "full_entry_s": full_s,
+                "delay_after_full_s": (float(e) - full_s if full_s is not None else None),
+                "pre_mid_c": st.get("pre_mid_c"),
+                "break_c": st.get("break_c"),
+                "threshold_c": threshold_c,
+                "current_mid_c": float(mid_c),
+            }
+            self._transition(ticker, "REC25_TRIGGERED", **payload)
+            self._lat("REC25_TRIGGERED", ticker=ticker, **payload)
 
         self._maybe_post_exit(ticker)
         return True
@@ -358,18 +305,14 @@ class Rec25M12Engine(V1122.CancelRestReconcileM12Engine):
         dt = self.dt.get(ticker) or {}
         if not bool(dt.get("full_entry_ready")) or bool(dt.get("exit_posted")):
             return
-
-        st = self._rec25_state(ticker)
-        if not bool(st.get("triggered")):
+        if not bool(self._rec25_state(ticker).get("triggered")):
             dt["phase"] = "FULL_ENTRY_WAITING_REC25"
             return
-
         return super()._maybe_post_exit(ticker)
 
     def on_book(self, r):
         out = super().on_book(r)
         self._record_l1(r)
-
         ticker = str((r or {}).get("ticker") or "")
         e = _finite((r or {}).get("elapsed_s"))
         if ticker and e is not None:
@@ -380,9 +323,8 @@ class Rec25M12Engine(V1122.CancelRestReconcileM12Engine):
         super().health(force=force)
         try:
             h = V1.B._read(self.health_path, {}) or {}
-            compact = {}
-            for ticker, st in self._rec25.items():
-                compact[str(ticker)] = {
+            compact = {
+                str(ticker): {
                     k: st.get(k)
                     for k in (
                         "tail", "first_fill_s", "full_entry_s", "pre_mid_c",
@@ -390,6 +332,8 @@ class Rec25M12Engine(V1122.CancelRestReconcileM12Engine):
                         "triggered", "trigger_s", "trigger_mid_c",
                     )
                 }
+                for ticker, st in self._rec25.items()
+            }
             h.update(
                 {
                     "rec25_live_version": LIVE_VERSION,
@@ -398,9 +342,7 @@ class Rec25M12Engine(V1122.CancelRestReconcileM12Engine):
                     "rec25_pre_exclude_s": PRE_EXCLUDE_S,
                     "rec25_pre_fallback_s": PRE_FALLBACK_S,
                     "rec25_states": compact,
-                    "rec25_history_rows": {
-                        str(k): len(v) for k, v in self._rec25_history.items()
-                    },
+                    "rec25_history_rows": {str(k): len(v) for k, v in self._rec25_history.items()},
                     "rec25_fixed_exit_no_reprice": True,
                 }
             )
@@ -410,37 +352,35 @@ class Rec25M12Engine(V1122.CancelRestReconcileM12Engine):
 
 
 def regression_rec25_rule(*, show=True):
-    """Pure offline regression for anchor window, fallback, NO transform and threshold."""
+    """Pure offline regression for primary/fallback windows, NO transform and threshold."""
     primary_hist = [
-        {"elapsed_s": 90.0, "yes_bid": 0.19, "yes_ask": 0.21},
-        {"elapsed_s": 92.0, "yes_bid": 0.21, "yes_ask": 0.23},
-        {"elapsed_s": 98.5, "yes_bid": 0.02, "yes_ask": 0.04},  # excluded final second
+        {"elapsed_s": 90.0, "yes_bid": 0.19, "yes_ask": 0.21},  # 20c midpoint
+        {"elapsed_s": 92.0, "yes_bid": 0.21, "yes_ask": 0.23},  # 22c midpoint
+        {"elapsed_s": 94.0, "yes_bid": 0.20, "yes_ask": 0.22},  # 21c midpoint
         {"elapsed_s": 99.2, "yes_bid": 0.01, "yes_ask": 0.03},  # excluded final second
     ]
     yes = _anchor_from_history(primary_hist, tail="YES", first_fill_s=100.0)
     no = _anchor_from_history(primary_hist, tail="NO", first_fill_s=100.0)
+
     fallback_hist = [
-        {"elapsed_s": 75.0, "yes_bid": 0.29, "yes_ask": 0.31},
-        {"elapsed_s": 95.0, "yes_bid": 0.09, "yes_ask": 0.11},
+        {"elapsed_s": 75.0, "yes_bid": 0.29, "yes_ask": 0.31},  # 30c
+        {"elapsed_s": 95.0, "yes_bid": 0.09, "yes_ask": 0.11},  # 10c
     ]
     fb = _anchor_from_history(fallback_hist, tail="YES", first_fill_s=100.0)
 
     checks = {
-        "primary_yes_anchor_21c": abs(float(yes["pre_mid_c"]) - 21.0) < 1e-12,
-        "primary_final_second_excluded": yes["pre_obs"] == 2,
+        "primary_mode": yes["anchor_mode"] == "PRIMARY_10S_TO_1S",
+        "primary_exact_3_obs": yes["pre_obs"] == 3,
+        "primary_final_second_excluded": abs(float(yes["pre_mid_c"]) - 21.0) < 1e-12,
         "primary_yes_break_16c": abs(float(yes["break_c"]) - 16.0) < 1e-12,
         "primary_yes_rec25_threshold_9c": abs(float(yes["threshold_c"]) - 9.0) < 1e-12,
-        "no_mid_transform": abs(float(no["pre_mid_c"]) - 79.0) < 1e-12,
+        "no_mid_transform_79c": abs(float(no["pre_mid_c"]) - 79.0) < 1e-12,
         "fallback_mode": fb["anchor_mode"] == "FALLBACK_30S",
         "fallback_used_when_primary_lt3": fb["pre_obs"] == 2,
+        "fallback_mid_20c": abs(float(fb["pre_mid_c"]) - 20.0) < 1e-12,
         "inherits_v1_12_2": issubclass(Rec25M12Engine, V1122.CancelRestReconcileM12Engine),
     }
-    out = {
-        **checks,
-        "ok": all(checks.values()),
-        "api_called": False,
-        "orders_sent": False,
-    }
+    out = {**checks, "ok": all(checks.values()), "api_called": False, "orders_sent": False}
     if show:
         print("=" * 140)
         print("V1.12.3 REC25 RULE REGRESSION — NO API / NO ORDERS")
@@ -505,7 +445,6 @@ def run_live_process(session, cfg):
     V1121.M12GuardRotatingGenerationEngine = Rec25M12Engine
     V1121.LIVE_VERSION = LIVE_VERSION
 
-    # Durable provenance beside the inherited strategy bundle.
     try:
         V1.B._atomic(
             session / "rec25_exit_policy.json",
