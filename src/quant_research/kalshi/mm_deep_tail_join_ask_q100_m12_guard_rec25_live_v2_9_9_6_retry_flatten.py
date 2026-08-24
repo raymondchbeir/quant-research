@@ -41,6 +41,7 @@ hard recycle, guardian 90s backstop, and reduce-only IOC terminal cleanup.
 Importing this module performs no API calls and sends no orders.
 """
 
+import inspect
 import time
 from pathlib import Path
 
@@ -254,6 +255,7 @@ def static_self_check(*, show=True):
     """Offline structural/regression audit. No API calls and no orders."""
     base = BASE.static_self_check(show=False)
     _install_patch()
+    retry_src = inspect.getsource(_recover_generation_fail_closed_retry)
 
     checks = {
         "base_v2995_ok": base.get("ok") is True,
@@ -264,7 +266,8 @@ def static_self_check(*, show=True):
         "retry_only_authoritative_not_flat": RECOVERY_RETRY_ERROR_TOKEN == "recovery failed authoritative verification",
         "retry_window_exact_45s": RECOVERY_RETRY_WINDOW_S == 45.0,
         "retry_pause_200ms": RECOVERY_RETRY_PAUSE_S == 0.20,
-        "retry_success_requires_recovery_verified": "recovery_verified" in _recover_generation_fail_closed_retry.__code__.co_names,
+        "retry_success_requires_recovery_verified": 'receipt.get("recovery_verified") is not True' in retry_src,
+        "retry_reinvokes_base_recovery": "_ORIGINAL_RECOVERY(" in retry_src and "continue" in retry_src,
         "runtime_q100_exact": RUNTIME.Q50_Q == 100.0,
         "parent_q100_exact": P.Q50_Q == 100.0,
         "q100_exact_100": Q100_Q == 100.0,
