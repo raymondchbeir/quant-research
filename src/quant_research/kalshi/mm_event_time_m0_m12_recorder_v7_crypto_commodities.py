@@ -29,6 +29,7 @@ import sys
 import time
 from pathlib import Path
 
+from . import recorder_core as C
 from . import mm_cycle_q10_live_strategy_v1 as B
 from . import mm_event_time_m0_m5_recorder_v5 as V5
 from . import mm_event_time_m0_m5_recorder_v5_auth as V5A
@@ -288,11 +289,12 @@ def stop_parent_recorder(pid, *, timeout_s=STOP_TIMEOUT_S):
 
 
 def static_self_check(*, show=True):
+    now = C.utc_now()
     phase_mid = _persist_phase(
         {
-            "window_start": C.utc_now(),
+            "window_start": now,
         },
-        C.utc_now(),
+        now,
     )
     checks = {
         "series_count_12": len(SERIES) == 12,
